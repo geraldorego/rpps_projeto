@@ -1,0 +1,16 @@
+{% extends 'app_rpps/base.html' %}
+
+{% block title %}Menu Principal - {{ sistema|default:"RPPS" }}{% endblock %}
+
+{% block content %}
+<div class="row row-cols-1 row-cols-sm-2 row-cols-md-3 row-cols-lg-4 row-cols-xl-5 g-4 mt-4">
+    {% for item in menu_items %}
+        <div class="col">
+            <div class="menu-card h-100" onclick="location.href='{% url 'dynamic_form' item.arquivo %}'">
+                <i class="bi {{ item.icone|default:'bi-file-earmark-text' }} menu-icon"></i>
+                <div class="menu-label">{{ item.label }}</div>
+            </div>
+        </div>
+    {% endfor %}
+</div>
+{% endblock %}

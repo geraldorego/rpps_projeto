@@ -1,0 +1,377 @@
+{% load form_tags %}
+<div class="modal-dialog modal-xl modal-dialog-scrollable" role="document">
+    <div class="modal-content">
+        <!-- Cabeçalho -->
+        <div class="modal-header bg-primary text-white">
+            <h5 class="modal-title">
+                <i class="bi bi-search"></i> Pesquisar {{ table_name }}
+            </h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+
+        <!-- Corpo do Modal -->
+        <div class="modal-body">
+            <!-- Barra de Pesquisa Genérica -->
+            <div class="card mb-3">
+                <div class="card-body py-2">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-8">
+                            <label for="grid-filter-input" class="form-label small mb-1">
+                                <i class="bi bi-search"></i> Pesquisar
+                            </label>
+                            <input id="grid-filter-input" 
+                                   type="text" 
+                                   class="form-control form-control-sm" 
+                                   placeholder="Digite para pesquisar (busca na coluna ordenada ou em todas)..." 
+                                   aria-label="Pesquisar registros">
+                        </div>
+                        <div class="col-md-4">
+                            <button id="grid-filter-btn" class="btn btn-primary btn-sm w-100" title="Buscar registros">
+                                <i class="bi bi-search"></i> Buscar
+                            </button>
+                            <button type="button" class="btn btn-success btn-sm w-100 mt-1" id="btn-novo-registro" data-tabela="{{ tabela }}">
+                                <i class="bi bi-plus-lg"></i> Novo
+                            </button>
+                        </div>
+                    </div>
+                    <div id="grid-sort-indicator" class="mt-2 text-muted small" aria-live="polite"></div>
+                </div>
+            </div>
+
+            <!-- Grid -->
+            <div id="search-grid-container">
+                {% include 'app_rpps/partials/search_grid_content.html' %}
+            </div>
+        </div>
+
+        <!-- Rodapé com Ações -->
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                <i class="bi bi-arrow-left"></i> Retornar
+            </button>
+            <a href="{% url 'export_excel' tabela=tabela %}?{{ request.GET.urlencode }}" 
+               class="btn btn-success" target="_blank">
+                <i class="bi bi-file-earmark-excel"></i> Excel
+            </a>
+            <a href="{% url 'export_pdf' tabela=tabela %}?{{ request.GET.urlencode }}" 
+               class="btn btn-danger" target="_blank">
+                <i class="bi bi-file-earmark-pdf"></i> PDF
+            </a>
+            <button id="transfer-selected-button" type="button" class="btn btn-primary">
+                <i class="bi bi-check-circle"></i> Transferir
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    'use strict';
+    console.log('[MODAL_SEARCH] ✅ Script modal_search.html carregado!');
+
+    function isVisible(el) {
+        if (!el) return false;
+        if (el.type === 'hidden') return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        // offsetParent is null for fixed/absolute in some cases, but good heuristic
+        return el.offsetParent !== null || style.position === 'fixed';
+    }
+
+// Limpar filtros
+function limparFiltrosModal() {
+    console.log('[MODAL] Limpando filtros...');
+    document.querySelectorAll('#search-filter-form input[type="text"]').forEach(input => input.value = '');
+    document.querySelectorAll('#search-filter-form select').forEach(select => select.selectedIndex = 0);
+    htmx.trigger('#search-filter-form', 'submit');
+}
+
+// Seleção única
+function initRadioCheckboxBehavior() {
+    document.querySelectorAll('input[name="selected_record"]').forEach(checkbox => {
+        checkbox.addEventListener('change', function() {
+            if (this.checked) {
+                document.querySelectorAll('input[name="selected_record"]').forEach(cb => {
+                    if (cb !== this) cb.checked = false;
+                });
+            }
+        });
+    });
+}
+
+// Inicializa ao carregar
+document.addEventListener('DOMContentLoaded', function() {
+    initRadioCheckboxBehavior();
+    
+    // Processa HTMX no conteúdo do modal
+    const modalContent = document.querySelector('.modal-dialog');
+    if (modalContent && typeof htmx !== 'undefined') {
+        htmx.process(modalContent);
+    }
+});
+
+// Reinicializa após HTMX swap
+document.body.addEventListener('htmx:afterSwap', function(evt) {
+    // Se o modal inteiro foi carregado
+    if (evt.detail.target.id === 'modal') {
+        const modalContent = document.querySelector('.modal-dialog');
+        if (modalContent && typeof htmx !== 'undefined') {
+            htmx.process(modalContent);
+        }
+        initRadioCheckboxBehavior();
+    }
+    
+    // Se apenas o grid foi atualizado
+    if (evt.detail.target.id === 'search-grid-container') {
+        initRadioCheckboxBehavior();
+        if (window.RPPS && window.RPPS.DocumentoMask) {
+            window.RPPS.DocumentoMask.init();
+        }
+    }
+});
+
+// Transferir registro
+const transferBtn = document.getElementById('transfer-selected-button');
+if (!transferBtn) {
+    console.error('[TRANSFER] ❌ BOTÃO TRANSFERIR NÃO ENCONTRADO NO DOM!');
+} else {
+    if (transferBtn.dataset.bound === 'true') {
+        console.log('[TRANSFER] ⏭️ Evento já registrado, ignorando duplicação.');
+    } else {
+        console.log('[TRANSFER] ✅ Botão Transferir encontrado, registrando evento...');
+        transferBtn.addEventListener('click', function() {
+        console.log('[TRANSFER] 🎯 Botão Transferir clicado!');
+        
+        const selectedCheckbox = document.querySelector('input[name="selected_record"]:checked');
+        console.log('[TRANSFER] Checkbox selecionado:', selectedCheckbox);
+    
+    if (!selectedCheckbox) {
+        console.error('[TRANSFER] ❌ Nenhum registro selecionado');
+        alert('Selecione um registro para transferir.');
+        return;
+    }
+    
+    const recordId = selectedCheckbox.value;
+    const tabela = '{{ tabela }}';
+    const parentTable = '{{ parent_table }}';
+    const isFkSearch = {% if is_fk_search %}true{% else %}false{% endif %};
+    
+    console.log('[TRANSFER] 📋 Iniciando transferência:', {
+        recordId,
+        tabela,
+        parentTable,
+        isFkSearch,
+        tipoDebug: typeof isFkSearch
+    });
+    
+    // Se é busca FK, preenche apenas o campo relacionado no formulário pai
+    if (isFkSearch && parentTable && parentTable !== tabela) {
+        console.log('[TRANSFER] ✅ Modo FK ATIVADO: Preenchendo campo no formulário', parentTable);
+        
+        const checkUrl = `/${tabela}/check/?id=${recordId}&parent_table=${parentTable}`;
+        
+        fetch(checkUrl, {
+            headers: { 'Accept': 'application/json' }
+        })
+        .then(response => {
+            console.log('[TRANSFER] Response status:', response.status);
+            return response.json();
+        })
+        .then(data => {
+            console.log('[TRANSFER] Dados recebidos (completo):', data);
+            if (data.exists && data.record) {
+                console.log('[TRANSFER] Record encontrado:', data.record);
+                
+                // Debug: verifica formulários disponíveis
+                const allForms = document.querySelectorAll('#dynamic-form');
+                console.log('[TRANSFER] Formulários encontrados:', allForms.length);
+                allForms.forEach(f => console.log('  - Form data-tabela:', f.getAttribute('data-tabela')));
+                
+                // Busca o formulário pai FORA do modal (no documento principal)
+                // Como o modal está sobreposto, precisa buscar no parent window
+                let parentForm = null;
+                
+                // Tenta primeiro no documento atual
+                allForms.forEach(form => {
+                    if (form.getAttribute('data-tabela') === parentTable) {
+                        parentForm = form;
+                        console.log('[TRANSFER] Formulário encontrado no documento atual');
+                    }
+                });
+                
+                console.log('[TRANSFER] Buscando formulário com selector:', `#dynamic-form[data-tabela="${parentTable}"]`);
+                console.log('[TRANSFER] Formulário encontrado?', !!parentForm);
+                
+                if (!parentForm) {
+                    console.error('[TRANSFER] ❌ Formulário pai não encontrado:', parentTable);
+                    console.error('[TRANSFER] Formulários disponíveis:', Array.from(allForms).map(f => f.getAttribute('data-tabela')));
+                    alert('Erro: formulário pai não encontrado. Verifique o console para detalhes.');
+                    return;
+                }
+                
+                // Preenche campos do formulário pai com dados do registro selecionado
+                let camposPreenchidos = 0;
+                Object.entries(data.record).forEach(([fieldName, value]) => {
+                    if (value === null || value === undefined) return;
+
+                    // Coleta todos os candidatos por name e filtra visíveis
+                    const candidates = Array.from(parentForm.querySelectorAll(`[name="${fieldName}"]`));
+                    let field = candidates.find(isVisible) || parentForm.querySelector(`#id_${fieldName}`);
+
+                    if (!field && candidates.length > 0) {
+                        // Se só achou ocultos, usa o primeiro mesmo assim
+                        field = candidates[0];
+                        console.log(`[TRANSFER] ℹ️ Usando campo oculto para ${fieldName}`);
+                    }
+
+                    if (!field) {
+                        console.log(`[TRANSFER] ⚠️ Campo ${fieldName} não encontrado no formulário pai`);
+                        return;
+                    }
+
+                    // Tratar SELECT vs INPUT
+                    if (field.tagName === 'SELECT') {
+                        const strVal = String(value);
+                        let option = Array.from(field.options).find(opt => String(opt.value) === strVal);
+                        if (!option) {
+                            option = new Option(strVal, strVal, true, true);
+                            field.add(option);
+                            console.log(`[TRANSFER] ➕ Option criada para SELECT ${fieldName}:`, strVal);
+                        }
+                        field.value = strVal;
+                    } else if (field.type === 'checkbox' || field.type === 'radio') {
+                        field.checked = Boolean(value);
+                    } else {
+                        field.value = value;
+                    }
+
+                    // Dispara eventos para máscaras/validações
+                    field.dispatchEvent(new Event('input', { bubbles: true }));
+                    field.dispatchEvent(new Event('change', { bubbles: true }));
+
+                    // Destaque visual rápido se visível
+                    if (isVisible(field)) {
+                        const oldBg = field.style.backgroundColor;
+                        field.style.backgroundColor = '#d4edda';
+                        setTimeout(() => { field.style.backgroundColor = oldBg || ''; }, 1200);
+                    }
+
+                    console.log(`[TRANSFER] ✅ Campo ${fieldName} preenchido:`, value);
+                    camposPreenchidos++;
+                });
+                console.log(`[TRANSFER] Total de campos preenchidos: ${camposPreenchidos}/${Object.keys(data.record).length}`);
+                
+                if (camposPreenchidos === 0) {
+                    console.warn('[TRANSFER] Nenhum campo foi preenchido! Verifique mapeamento.');
+                }
+                
+                // Fecha modal
+                closeModalAndCleanup();
+            } else {
+                alert('Registro não encontrado');
+            }
+        })
+        .catch(error => {
+            console.error('[TRANSFER] Erro:', error);
+            alert('Erro ao transferir: ' + error.message);
+        });
+        
+    } else {
+        // Modo normal: substitui o formulário completo (pesquisa global)
+        console.log('[TRANSFER] ⚠️ Modo NORMAL: Substituindo formulário completo');
+        console.log('[TRANSFER] Condição FK falhou:', {
+            isFkSearch,
+            parentTable,
+            tabela,
+            'parentTable !== tabela': parentTable !== tabela
+        });
+        
+        const checkUrl = `/${tabela}/check/?id=${recordId}`;
+        
+        fetch(checkUrl, {
+            headers: { 'HX-Request': 'true', 'HX-Target': 'body' }
+        })
+        .then(response => response.text())
+        .then(html => {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            const newForm = doc.querySelector('#dynamic-form');
+            const currentForm = document.querySelector('#dynamic-form');
+            
+            if (newForm && currentForm) {
+                currentForm.parentNode.replaceChild(document.importNode(newForm, true), currentForm);
+                
+                // Reinicializa JavaScript
+                if (window.RPPS) {
+                    setTimeout(() => {
+                        if (window.RPPS.DocumentoMask) window.RPPS.DocumentoMask.init();
+                        if (window.RPPS.FormNavigation) window.RPPS.FormNavigation.init();
+                    }, 100);
+                }
+            }
+            
+            closeModalAndCleanup();
+        })
+        .catch(error => {
+            console.error('[TRANSFER] Erro:', error);
+            alert('Erro ao transferir: ' + error.message);
+        });
+    }
+        });
+        transferBtn.dataset.bound = 'true';
+    }
+}
+
+// Função auxiliar para fechar modal e limpar backdrop
+function closeModalAndCleanup() {
+    const modalEl = document.getElementById('modal');
+    if (modalEl) {
+        const modalInstance = bootstrap.Modal.getInstance(modalEl);
+        if (modalInstance) {
+            modalInstance.hide();
+        } else {
+            const modal = new bootstrap.Modal(modalEl);
+            modal.hide();
+        }
+    }
+    
+    // Remove backdrop manualmente
+    setTimeout(() => {
+        const backdrop = document.querySelector('.modal-backdrop');
+        if (backdrop) backdrop.remove();
+        document.body.classList.remove('modal-open');
+        document.body.style.removeProperty('overflow');
+        document.body.style.removeProperty('padding-right');
+    }, 300);
+}
+})();
+</script>
+
+<!-- NOVO: Modal CRUD reutilizável para Novo/Editar -->
+<div class="modal fade" id="modal-crud" tabindex="-1" aria-labelledby="modalCrudLabel" aria-hidden="true" data-bs-backdrop="static">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header bg-primary text-white">
+        <h5 class="modal-title" id="modalCrudLabel">
+          <i class="bi bi-pencil-square"></i> <span id="modal-crud-title">Registro</span>
+        </h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body" id="modal-crud-body">
+        <div class="text-center py-4">
+          <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Carregando...</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+          <i class="bi bi-arrow-left"></i> Retornar
+        </button>
+        <button type="button" id="modal-crud-salvar" class="btn btn-primary">
+          <i class="bi bi-check-circle"></i> Salvar
+        </button>
+      </div>
+    </div>
+  </div>
+</div>

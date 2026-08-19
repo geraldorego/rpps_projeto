@@ -1,0 +1,48 @@
+<!-- Formulário Simples para Modal CRUD -->
+<form id="dynamic-form" method="POST" 
+      action="{% if record_id %}{% url 'tratamento_record' tabela=tabela record_id=record_id %}{% else %}{% url 'tratamento_record' tabela=tabela %}{% endif %}" 
+      novalidate>
+    {% csrf_token %}
+    <input type="hidden" name="acao" value="salvar">
+    
+    {% if record_id %}
+        <!-- Campo hidden com a PK correta (id, CpfCnpj, etc) -->
+        <input type="hidden" name="{{ pk_field }}" value="{{ record_id }}">
+    {% endif %}
+    
+    <!-- Grid 2 colunas para campos -->
+    <div class="row g-3">
+        {% for field in form %}
+            <div class="col-md-6">
+                <label for="{{ field.id_for_label }}" class="form-label small fw-bold">
+                    {{ field.label }}
+                    {% if field.field.required %}
+                        <span class="text-danger">*</span>
+                    {% endif %}
+                </label>
+                
+                {{ field }}
+                
+                {% if field.errors %}
+                    <div class="invalid-feedback d-block">
+                        {% for error in field.errors %}
+                            {{ error }}
+                        {% endfor %}
+                    </div>
+                {% endif %}
+                
+                {% if field.help_text %}
+                    <small class="form-text text-muted">{{ field.help_text }}</small>
+                {% endif %}
+            </div>
+        {% endfor %}
+    </div>
+    
+    {% if form.non_field_errors %}
+        <div class="alert alert-danger mt-3" role="alert">
+            {% for error in form.non_field_errors %}
+                {{ error }}
+            {% endfor %}
+        </div>
+    {% endif %}
+</form>

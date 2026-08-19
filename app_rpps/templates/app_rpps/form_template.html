@@ -1,0 +1,283 @@
+{% extends 'app_rpps/base.html' %}
+{% load form_tags %}
+{% load static %}
+
+{% block content %}
+<style>
+.messages-container {
+    margin-left: 1rem;
+}
+.messages-container .alert {
+    margin-bottom: 0;
+    padding: 0.5rem 1rem;
+}
+.messages-container .alert .btn-close {
+    padding: 0.75rem;
+}
+</style>
+<div id="form-container" class="container-fluid mt-3">
+    <!-- NOVO: Header responsivo com 3 colunas conforme solicitação -->
+    <div class="mb-4">
+        <div class="row align-items-center">
+            <!-- Coluna 1: Nome do Sistema -->
+            <div class="col-12 col-md-4">
+                <h1 class="h3 mb-0">{{ nome_tela }}</h1>
+            </div>
+            
+            <!-- Coluna 2: Área de Mensagens -->
+            <div class="col-12 col-md-4 d-flex justify-content-center">
+                <div id="mensagens" class="w-100" aria-live="polite" role="status">
+                    {% if messages %}
+                        {% for message in messages %}
+                        <div class="alert alert-{{ message.tags }} alert-dismissible fade show py-2 mb-1" role="alert">
+                            <div class="d-flex align-items-center">
+                                {% if message.tags == 'success' %}
+                                    <i class="bi bi-check-circle-fill me-2"></i>
+                                {% elif message.tags == 'error' %}
+                                    <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                                {% elif message.tags == 'warning' %}
+                                    <i class="bi bi-exclamation-circle-fill me-2"></i>
+                                {% else %}
+                                    <i class="bi bi-info-circle-fill me-2"></i>
+                                {% endif %}
+                                <div>{{ message }}</div>
+                            </div>
+                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Fechar"></button>
+                        </div>
+                        {% endfor %}
+                    {% endif %}
+                </div>
+            </div>
+            
+            <!-- Coluna 3: Botões Pesquisar e Retornar ao Menu -->
+            <div class="col-12 col-md-4 d-flex justify-content-end gap-2">
+                <button type="button" 
+                        class="btn btn-primary" 
+                        id="btn-pesquisa-global"
+                        data-tabela="{{ tabela }}"
+                        title="Pesquisar registros existentes"
+                        aria-label="Pesquisar">
+                    <i class="bi bi-search"></i> Pesquisar
+                </button>
+                <a href="{% url 'menu' %}" class="btn btn-secondary" title="Retornar ao menu" aria-label="Retornar ao menu">
+                    <i class="bi bi-arrow-left"></i> Retornar ao Menu
+                </a>
+            </div>
+        </div>
+    </div>
+
+    {% if no_fields %}
+    <div class="card border-warning">
+        <div class="card-body text-center">
+            <div class="alert alert-warning" role="alert">
+                 <h2 class="h4">Configuração necessária</h2>
+                 <p class="mb-0">A tabela <strong>{{ nome_tela }}</strong> existe mas não possui campos configurados.</p>
+            </div>
+        </div>
+    </div>
+    {% elif form %}
+    <form method="post" id="dynamic-form" class="needs-validation" novalidate 
+          data-tabela="{{ tabela }}"
+          action="{% if acao == 'Botao' %}{% url 'gerar_xml' tabela=tabela %}{% else %}{% if record_id %}{% url 'tratamento_record' tabela=tabela record_id=record_id %}{% else %}{% url 'tratamento_record' tabela=tabela %}{% endif %}{% endif %}"
+          onsubmit="return window._formCanSubmit === true;">
+        {% csrf_token %}
+        <input type="hidden" name="acao" id="acao-hidden-input">
+
+        <div class="card mb-4">
+            <div class="card-body">
+                <div class="row g-3">
+                    {% for field in form %}
+                        <div class="col-md-4">
+                            <label for="{{ field.id_for_label }}" class="form-label">{{ field.label }}{% if field.field.required %}<span class="text-danger">*</span>{% endif %}</label>
+                            
+                            {# APENAS campos com tabela_referencia (FK) têm botão individual #}
+                            {% if field.name in fk_modal_tables %}
+                                <div class="input-group">
+                                    {% if field.name in fk_field_mappings %}
+                                        {# Campo FK com mapeamento de campos relacionados #}
+                                        {% render_fk_field_with_mapping field field.name fk_field_mappings %}
+                                    {% else %}
+                                        {# Campo FK simples #}
+                                        {% if field.name in campos_chave %}
+                                            {{ field|add_class:"form-control campo-chave" }}
+                                        {% else %}
+                                            {{ field|add_class:"form-control" }}
+                                        {% endif %}
+                                    {% endif %}
+                                    {# Botão para pesquisar na tabela de referência (FK) #}
+                                    <button class="btn btn-outline-secondary btn-pesquisa" 
+                                            type="button"
+                                            hx-get="{% url 'modal_search' tabela=fk_modal_tables|get_item:field.name %}?fk_search=true&parent_table={{ tabela }}"
+                                            hx-target="#modal"
+                                            hx-swap="innerHTML"
+                                            hx-push-url="false"
+                                            hx-trigger="click"
+                                            title="Pesquisar em {{ fk_modal_tables|get_item:field.name }}">
+                                        <i class="bi bi-search"></i>
+                                    </button>
+                                </div>
+                            {% else %}
+                                {# Campos sem botão (nem FK nem chave) #}
+                                {% if field.name in campos_chave %}
+                                    {{ field|add_class:"form-control campo-chave" }}
+                                {% else %}
+                                    {{ field|add_class:"form-control" }}
+                                {% endif %}
+                            {% endif %}
+
+                            {% if field.errors %}
+                            <div class="invalid-feedback d-block">
+                                {{ field.errors|join:", " }}
+                            </div>
+                            {% endif %}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="card-footer bg-light">
+                <div class="d-flex justify-content-end gap-2">
+                    {% if acao == "Botao" %}
+                    <button type="submit" class="btn btn-info" onclick="window._formCanSubmit = true; document.getElementById('acao-hidden-input').value='gerar_xml';">
+                        <i class="bi bi-file-earmark-code"></i> Gerar XML
+                    </button>
+                    {% else %}
+                        <button type="submit" class="btn btn-primary" onclick="window._formCanSubmit = true; document.getElementById('acao-hidden-input').value='salvar';">
+                            <i class="bi bi-save"></i> Salvar
+                        </button>
+                        <div class="dropdown">
+                            <button class="btn btn-info dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                                <i class="bi bi-file-earmark-text"></i> Relatório
+                            </button>
+                            <ul class="dropdown-menu">
+                                <li>
+                                    <a class="dropdown-item" href="{% url 'export_pdf' tabela=tabela %}?{{ request.GET.urlencode }}" target="_blank">📄 Gerar PDF</a>
+                                </li>
+                                <li>
+                                    <a class="dropdown-item" href="{% url 'export_excel' tabela=tabela %}?{{ request.GET.urlencode }}" target="_blank">📊 Gerar Excel</a>
+                                </li>
+                            </ul>
+                        </div>
+                        {% if exists %}
+                            <button type="submit" class="btn btn-danger" onclick="window._formCanSubmit = true; document.getElementById('acao-hidden-input').value='excluir'; return confirm('Tem certeza que deseja excluir este registro?');">
+                                <i class="bi bi-trash"></i> Excluir
+                            </button>
+                        {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </form>
+    {% endif %}
+</div>
+
+<!-- Script para campos relacionados FK -->
+<script src="{% static 'js/fk_related_fields.js' %}"></script>
+<script>
+    // Configura contexto para campos FK com mapeamento
+    {% if fk_field_mappings %}
+    window.FK_RELATED_CONFIG = {{ fk_field_mappings|jsonify|safe }};
+    console.log('[FK_RELATED] Configuração carregada:', window.FK_RELATED_CONFIG);
+    {% endif %}
+    
+    // Handler do botão de pesquisa global - coleta valores dos campos chave
+    function normalizeFieldName(value) {
+        return String(value || '').replace(/_/g, '').toLowerCase();
+    }
+
+    function getFormValueByFieldName(form, fieldName) {
+        if (!form || !fieldName) return '';
+
+        const exact = form.querySelector(`[name="${fieldName}"]`);
+        if (exact && typeof exact.value !== 'undefined') {
+            return exact.value.trim();
+        }
+
+        const normalizedName = normalizeFieldName(fieldName);
+        let matched = null;
+        form.querySelectorAll('[name]').forEach(el => {
+            if (!matched && normalizeFieldName(el.name) === normalizedName) {
+                matched = el;
+            }
+        });
+
+        return matched && typeof matched.value !== 'undefined' ? matched.value.trim() : '';
+    }
+
+    function appendDynamicFkFilters(form, params, fieldElement) {
+        if (!form || !fieldElement) return;
+
+        try {
+            const fkDepsRaw = fieldElement.dataset.fkDeps || '';
+            if (!fkDepsRaw) return;
+
+            const fkDeps = JSON.parse(fkDepsRaw);
+            Object.values(fkDeps).forEach(fieldName => {
+                const value = getFormValueByFieldName(form, fieldName);
+                if (value) {
+                    params.append(fieldName, value);
+                }
+            });
+        } catch (error) {
+            console.warn('[FK_MODAL] Não foi possível ler os filtros dinâmicos do campo FK:', error);
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        const btnPesquisaGlobal = document.getElementById('btn-pesquisa-global');
+        if (btnPesquisaGlobal) {
+            btnPesquisaGlobal.addEventListener('click', function() {
+                const tabela = this.dataset.tabela;
+                const form = document.getElementById('dynamic-form');
+                
+                // Coleta valores dos campos chave
+                const params = new URLSearchParams();
+                const camposChave = [{% for campo in campos_chave %}'{{ campo }}'{% if not forloop.last %}, {% endif %}{% endfor %}];
+                
+                if (camposChave && Array.isArray(camposChave) && camposChave.length > 0) {
+                    camposChave.forEach(campo => {
+                        const value = getFormValueByFieldName(form, campo);
+                        if (value) {
+                            params.append(campo, value);
+                        }
+                    });
+                }
+                
+                // Monta URL com filtros
+                const baseUrl = `/modal-search/${tabela}/`;
+                const fullUrl = params.toString() ? `${baseUrl}?${params.toString()}` : baseUrl;
+                
+                // Usa HTMX para carregar o modal
+                htmx.ajax('GET', fullUrl, {
+                    target: '#modal',
+                    swap: 'innerHTML'
+                });
+            });
+        }
+
+        document.querySelectorAll('.btn-pesquisa').forEach(button => {
+            button.addEventListener('click', function(event) {
+                const form = document.getElementById('dynamic-form');
+                const inputGroup = this.closest('.input-group');
+                const fieldElement = inputGroup ? inputGroup.querySelector('[data-fk-deps]') : null;
+                const baseUrl = this.getAttribute('hx-get');
+                if (!baseUrl || !form) return;
+
+                const params = new URLSearchParams();
+                appendDynamicFkFilters(form, params, fieldElement);
+
+                const separator = baseUrl.includes('?') ? '&' : '?';
+                const fullUrl = params.toString() ? `${baseUrl}${separator}${params.toString()}` : baseUrl;
+                this.setAttribute('hx-get', fullUrl);
+
+                setTimeout(() => {
+                    this.setAttribute('hx-get', baseUrl);
+                }, 0);
+            });
+        });
+    });
+</script>
+{% endblock content %}
+
+<!-- Modal placeholder is provided globally in base.html -->
+<!-- Modal handling is now managed by app.js -->

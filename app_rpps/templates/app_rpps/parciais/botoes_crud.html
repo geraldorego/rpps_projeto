@@ -1,0 +1,19 @@
+<div class="d-flex gap-2">
+    {% if exists %}
+        <button type="submit" class="btn btn-primary" name="acao" value="salvar">
+            <i class="bi bi-save"></i> Salvar
+        </button>
+        <button type="submit" class="btn btn-danger" name="acao" value="excluir"
+                onclick="return confirm('Tem certeza que deseja excluir este registro?')">
+            <i class="bi bi-trash"></i> Excluir
+        </button>
+    {% else %}
+        <button type="submit" class="btn btn-primary" name="acao" value="salvar">
+            <i class="bi bi-save"></i> Salvar
+        </button>
+    {% endif %}
+    
+    <a href="{% url 'menu' %}" class="btn btn-secondary">
+        <i class="bi bi-arrow-left"></i> Voltar
+    </a>
+</div>

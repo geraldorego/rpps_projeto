@@ -1,0 +1,26 @@
+<div class="modal fade" id="reportModal" tabindex="-1" aria-labelledby="reportModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="reportModalLabel">Relatório - {{ nome_tela }}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="reportModalBody">
+                <div class="text-center">
+                    <div class="spinner-border" role="status">
+                        <span class="visually-hidden">Carregando...</span>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+                <a href="#" id="export-excel-btn" class="btn btn-success">
+                    <i class="bi bi-file-earmark-excel"></i> Exportar para Excel
+                </a>
+                <a href="#" id="export-pdf-btn" class="btn btn-danger">
+                    <i class="bi bi-file-earmark-pdf"></i> Exportar para PDF
+                </a>
+            </div>
+        </div>
+    </div>
+</div>

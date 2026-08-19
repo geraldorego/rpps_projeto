@@ -1,0 +1,6 @@
+
+
+   .input[maxlength] {
+        width: calc(10px + 1ch * attr(maxlength));
+        max-width: 100%;
+    }

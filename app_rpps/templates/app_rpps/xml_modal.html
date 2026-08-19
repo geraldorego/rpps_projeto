@@ -1,0 +1,66 @@
+<div class="modal fade" id="xmlModal" tabindex="-1" aria-labelledby="xmlModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="xmlModalLabel">Resultado da Geração de XML</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <table class="table table-bordered">
+            <thead>
+              <tr>
+                <th>Arquivo</th>
+                <th>XML Vazio</th>
+                <th>Motivo</th>
+                <th>XML Gerado</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in xml_data %}
+              <tr>
+                <td>{{ item.nomarq }}</td>
+                <td>
+                  <input type="checkbox" {% if item.xml_vazio %}checked{% endif %} disabled>
+                  {{ item.motivo_vazio }}
+                </td>
+                <td>
+                  <input type="checkbox" {% if item.xml_gerado %}checked{% endif %} disabled>
+                  {{ item.motivo_geracao }}
+                </td>
+                <td>
+                  {% if item.xml_gerado %}
+                    <a href="{% get_media_prefix %}{{ item.nomarq }}.xml" target="_blank">Ver XML</a>
+                  {% else %}
+                    Não gerado
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.body.addEventListener('htmx:afterSwap', function(evt) {
+        if (evt.detail.elt.id === 'form-container') {
+            const response = JSON.parse(evt.detail.xhr.responseText);
+            if (response.show_modal) {
+                // Carrega o conteúdo da modal via AJAX
+                fetch(response.modal_url)
+                    .then(res => res.text())
+                    .then(html => {
+                        document.body.insertAdjacentHTML('beforeend', html);
+                        var modal = new bootstrap.Modal(document.getElementById('xmlModal'));
+                        modal.show();
+                    });
+            }
+        }
+    });
+  </script>

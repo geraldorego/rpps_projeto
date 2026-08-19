@@ -1,0 +1,110 @@
+<!-- Grid de Resultados -->
+<div class="table-responsive">
+    {% if grid_data %}
+        <table class="table table-sm table-striped table-hover table-bordered align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th style="width: 40px;" class="text-center">
+                        <i class="bi bi-check-square"></i>
+                    </th>
+                    {% for header in field_headers %}
+                        <!-- Headers clicáveis para ordenação (usa nome do campo, não label) -->
+                        <th class="small sortable" role="button" tabindex="0" 
+                            data-field="{{ header.name }}" 
+                            data-sort-dir="none" 
+                            aria-sort="none" 
+                            style="cursor: pointer;">
+                            {{ header.label }} <i class="bi bi-chevron-expand ms-1 sort-icon"></i>
+                        </th>
+                    {% endfor %}
+                    <!-- NOVO: Coluna de ações -->
+                    <th style="width: 100px;" class="text-center small">Ações</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in grid_data %}
+                    <tr data-record-id="{{ row.id }}" data-tabela="{{ tabela }}">
+                        <td class="text-center">
+                            <input type="checkbox" 
+                                   name="selected_record" 
+                                   value="{{ row.id }}" 
+                                   class="form-check-input"
+                                   style="cursor: pointer;">
+                        </td>
+                        {% for value in row.values %}
+                            <td class="small">{{ value }}</td>
+                        {% endfor %}
+                        <!-- NOVO: Ícones de Editar e Excluir -->
+                        <td class="text-center">
+                            <button class="btn btn-sm btn-outline-secondary btn-edit" title="Editar" aria-label="Editar registro">
+                                <i class="bi bi-pencil-square"></i>
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger btn-delete" title="Excluir" aria-label="Excluir registro">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <!-- Paginação -->
+        {% if page_obj.has_other_pages %}
+            <nav>
+                <ul class="pagination pagination-sm justify-content-center">
+                    {% if page_obj.has_previous %}
+                        <li class="page-item">
+                            <a class="page-link" 
+                               hx-get="{% url 'modal_search' tabela=tabela %}?page={{ page_obj.previous_page_number }}{% for key, value in request.GET.items %}{% if key != 'page' %}&{{ key }}={{ value }}{% endif %}{% endfor %}"
+                               hx-target="#search-grid-container"
+                               hx-swap="innerHTML"
+                               style="cursor: pointer;">
+                                &laquo;
+                            </a>
+                        </li>
+                    {% endif %}
+
+                    {% for num in page_obj.paginator.page_range %}
+                        {% if page_obj.number == num %}
+                            <li class="page-item active"><span class="page-link">{{ num }}</span></li>
+                        {% elif num > page_obj.number|add:'-3' and num < page_obj.number|add:'3' %}
+                            <li class="page-item">
+                                <a class="page-link" 
+                                   hx-get="{% url 'modal_search' tabela=tabela %}?page={{ num }}{% for key, value in request.GET.items %}{% if key != 'page' %}&{{ key }}={{ value }}{% endif %}{% endfor %}"
+                                   hx-target="#search-grid-container"
+                                   hx-swap="innerHTML"
+                                   style="cursor: pointer;">
+                                    {{ num }}
+                                </a>
+                            </li>
+                        {% endif %}
+                    {% endfor %}
+
+                    {% if page_obj.has_next %}
+                        <li class="page-item">
+                            <a class="page-link" 
+                               hx-get="{% url 'modal_search' tabela=tabela %}?page={{ page_obj.next_page_number }}{% for key, value in request.GET.items %}{% if key != 'page' %}&{{ key }}={{ value }}{% endif %}{% endfor %}"
+                               hx-target="#search-grid-container"
+                               hx-swap="innerHTML"
+                               style="cursor: pointer;">
+                                &raquo;
+                            </a>
+                        </li>
+                    {% endif %}
+                </ul>
+            </nav>
+        {% endif %}
+
+        <!-- Info -->
+        <div class="text-center text-muted mt-2">
+            <small>
+                Mostrando {{ page_obj.start_index }} a {{ page_obj.end_index }} de {{ page_obj.paginator.count }} registro(s)
+            </small>
+        </div>
+    {% else %}
+        <div class="alert alert-warning text-center">
+            <i class="bi bi-exclamation-triangle"></i>
+            Nenhum registro encontrado.
+        </div>
+    {% endif %}
+</div>

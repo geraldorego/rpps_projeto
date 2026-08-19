@@ -1,0 +1,158 @@
+<div class="modal-dialog modal-xl" role="document">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h5 class="modal-title">Pesquisar em {{ table_name|title }}</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+            <!-- Hidden Form -->
+            <form id="search-form" hx-get="{% url 'modal_grid' menu_option %}" hx-target="#grid-container" hx-swap="innerHTML">
+                {% for field in headers %}
+                <input type="hidden" id="{{ field }}" name="{{ field }}" value="">
+                {% endfor %}
+            </form>
+
+            <!-- Filtros Aplicados -->
+            <div class="alert alert-info mb-3">
+                Mostrando resultados filtrados pela seleção da tela principal
+            </div>
+
+            <script>
+            document.addEventListener('DOMContentLoaded', function() {
+                // Pega o elemento que disparou a abertura do modal
+                var sourceInput = window.parent.document.getElementById('{{ target_input_id }}');
+                if (!sourceInput) return;
+
+                // Pega o form pai
+                var parentForm = sourceInput.closest('form');
+                if (!parentForm) return;
+
+                // Para cada campo oculto no nosso form
+                document.querySelectorAll('#search-form input[type="hidden"]').forEach(function(input) {
+                    // Tenta encontrar o campo correspondente no form pai
+                    var parentField = parentForm.querySelector('#id_' + input.name);
+                    if (parentField && parentField.value && parentField.value !== '0' && parentField.value !== '') {
+                        // Se encontrar e tiver valor válido, copia o valor
+                        input.value = parentField.value;
+                    } else {
+                        // Se for 0 ou vazio, limpa o campo para não enviar no filtro
+                        input.value = '';
+                    }
+                });
+
+                // Submete o form para fazer a busca inicial
+                document.getElementById('search-form').dispatchEvent(new Event('submit'));
+            });
+            </script>
+
+            <!-- Container único da Grid (alvo do HTMX) -->
+            <div id="grid-container">
+                {% include 'app_rpps/partials/grid_content.html' %}
+            </div>
+            
+            <!-- Debug Script -->
+            <script>
+            document.body.addEventListener('htmx:beforeRequest', function(evt) {
+                console.log('[HTMX DEBUG] Before Request:', {
+                    target: evt.detail.target.id,
+                    path: evt.detail.path,
+                    headers: evt.detail.xhr.getAllResponseHeaders ? 'XHR' : 'Fetch'
+                });
+            });
+            
+            document.body.addEventListener('htmx:afterSwap', function(evt) {
+                console.log('[HTMX DEBUG] After Swap:', {
+                    target: evt.detail.target.id,
+                    targetHTML: evt.detail.target.innerHTML.substring(0, 100) + '...'
+                });
+            });
+            </script>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                <i class="bi bi-arrow-left"></i> Retornar
+            </button>
+            <a href="{% url 'export_pdf' menu_option %}?{{ request.GET.urlencode }}" class="btn btn-danger" target="_blank">
+                <i class="bi bi-file-earmark-pdf"></i> Gerar PDF
+            </a>
+            <a href="{% url 'export_excel' menu_option %}?{{ request.GET.urlencode }}" class="btn btn-success" target="_blank">
+                <i class="bi bi-file-earmark-excel"></i> Exportar Excel
+            </a>
+            <button id="transfer-button" type="button" class="btn btn-primary">
+                <i class="bi bi-transfer"></i> Transferir
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('transfer-button').addEventListener('click', function() {
+    const selectedIds = Array.from(document.querySelectorAll('input[name="selected_item"]:checked'))
+                             .map(cb => cb.value);
+    
+    if (selectedIds.length === 0) {
+        alert('Por favor, selecione ao menos um registro.');
+        return;
+    }
+
+    const selectedId = selectedIds[0];
+    console.log('[TRANSFER] ID selecionado:', selectedId);
+    
+    // Chama check_record com o ID selecionado
+    fetch(`{% url 'check_record' menu_option %}?id=${selectedId}`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Erro HTTP ${response.status}`);
+            }
+            return response.text();
+        })
+        .then(html => {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            
+            const newForm = doc.querySelector('#dynamic-form');
+            const currentForm = document.querySelector('#dynamic-form');
+            
+            if (newForm && currentForm) {
+                console.log('[TRANSFER] Substituindo formulário...');
+                currentForm.parentNode.replaceChild(newForm, currentForm);
+                
+                // Dispara evento para notificar a troca
+                document.body.dispatchEvent(new CustomEvent('formAtualizado', {
+                    bubbles: true,
+                    detail: { id: selectedId }
+                }));
+                
+                console.log('[TRANSFER] Formulário substituído e evento disparado.');
+            } else {
+                console.error('[TRANSFER] Formulário #dynamic-form não encontrado no HTML retornado.');
+                alert('Erro: Resposta do servidor inválida.');
+            }
+            
+            // Fecha modal após transferência bem-sucedida
+            const modalEl = document.getElementById('modal');
+            if (modalEl) {
+                const modalInstance = bootstrap.Modal.getInstance(modalEl);
+                if (modalInstance) {
+                    modalInstance.hide();
+                } else {
+                    const modal = new bootstrap.Modal(modalEl);
+                    modal.hide();
+                }
+            }
+            
+            // Remove backdrop manualmente caso fique preso
+            setTimeout(() => {
+                const backdrop = document.querySelector('.modal-backdrop');
+                if (backdrop) backdrop.remove();
+                document.body.classList.remove('modal-open');
+                document.body.style.removeProperty('overflow');
+                document.body.style.removeProperty('padding-right');
+            }, 300);
+        })
+        .catch(error => {
+            console.error('[TRANSFER] Erro ao carregar registro:', error);
+            alert('Erro ao carregar registro: ' + error.message);
+        });
+});
+</script>
