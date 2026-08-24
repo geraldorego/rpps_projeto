@@ -117,6 +117,7 @@
                         const input = this;
                         const valor = (input.value || '').trim();
                         const fieldName = input.getAttribute('data-fk-field') || input.name;
+                        const searchField = input.getAttribute('data-fk-search-field') || fieldName;
 
                         if (!valor || !fieldName) return;
 
@@ -133,7 +134,7 @@
 
                         console.log(`[AppRpps][FK] 🔍 Blur em '${tabela}.${fieldName}' = "${valor}" (tabela_referencia="${input.dataset.tabelaRef || ''}")`);
 
-                        const url = '/' + tabela + '/check-fk/' + encodeURIComponent(fieldName) + '/?' + encodeURIComponent(fieldName) + '=' + encodeURIComponent(valor);
+                        const url = '/' + tabela + '/check-fk/' + encodeURIComponent(fieldName) + '/?' + encodeURIComponent(searchField) + '=' + encodeURIComponent(valor);
 
                         fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
                             .then(function(response) { return response.json(); })

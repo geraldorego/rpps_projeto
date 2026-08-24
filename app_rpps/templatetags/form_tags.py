@@ -60,12 +60,13 @@ def render_fk_field_with_mapping(field, field_name, fk_mappings):
     """
     attrs = {}
     
-    # Verifica se este campo tem mapeamento FK
+    # Todos os campos com tabela_referencia precisam do handler de blur.
     if field_name in fk_mappings:
         mapping_info = fk_mappings[field_name]
         
         attrs['data-fk-field'] = field_name
         attrs['data-tabela-ref'] = mapping_info.get('tabela_referencia', '')
+        attrs['data-fk-search-field'] = mapping_info.get('campo_busca_referencia', '')
         ref_dsl = mapping_info.get('tabela_referencia_dsl') or mapping_info.get('tabela_referencia', '')
         if ref_dsl:
             attrs['data-fk-deps'] = json.dumps(parse_referencia_dependencias(ref_dsl))

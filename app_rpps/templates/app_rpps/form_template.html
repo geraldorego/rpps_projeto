@@ -93,17 +93,7 @@
                             {# APENAS campos com tabela_referencia (FK) têm botão individual #}
                             {% if field.name in fk_modal_tables %}
                                 <div class="input-group">
-                                    {% if field.name in fk_field_mappings %}
-                                        {# Campo FK com mapeamento de campos relacionados #}
-                                        {% render_fk_field_with_mapping field field.name fk_field_mappings %}
-                                    {% else %}
-                                        {# Campo FK simples #}
-                                        {% if field.name in campos_chave %}
-                                            {{ field|add_class:"form-control campo-chave" }}
-                                        {% else %}
-                                            {{ field|add_class:"form-control" }}
-                                        {% endif %}
-                                    {% endif %}
+                                    {% render_fk_field_with_mapping field field.name fk_field_mappings %}
                                     {# Botão para pesquisar na tabela de referência (FK) #}
                                     <button class="btn btn-outline-secondary btn-pesquisa" 
                                             type="button"

@@ -785,14 +785,6 @@ def check_fk_field(request, tabela, campo_fk):
             logger.warning(f"[CHECK_FK] ⛔ Campo '{campo_fk}' sem tabela_referencia configurada em RppsEstrutura")
             return JsonResponse({'error': 'Campo FK não configurado'}, status=400)
         
-        # Pega o valor digitado
-        valor_digitado = request.GET.get(campo_fk, '').strip()
-        
-        if not valor_digitado:
-            return JsonResponse({'error': 'Valor vazio'}, status=400)
-        
-        logger.info(f"[CHECK_FK] Buscando '{campo_fk}'='{valor_digitado}' em '{campo_config.tabela_referencia}'")
-        
         config = get_referencia_config(campo_config)
         nome_tabela_ref = config.get('tabela')
         campo_pk_ref = config.get('campo_tabela')
@@ -802,6 +794,16 @@ def check_fk_field(request, tabela, campo_fk):
             nome_tabela_ref = nome_tabela_ref or fallback[0]
             campo_pk_ref = campo_pk_ref or fallback[1]
 
+        # O valor vem com o nome do campo da tabela de referencia.
+        valor_digitado = request.GET.get(campo_pk_ref or campo_fk, '').strip()
+        if not valor_digitado and campo_pk_ref != campo_fk:
+            valor_digitado = request.GET.get(campo_fk, '').strip()
+        
+        if not valor_digitado:
+            return JsonResponse({'error': 'Valor vazio'}, status=400)
+        
+        logger.info(f"[CHECK_FK] Buscando '{campo_fk}'='{valor_digitado}' em '{campo_config.tabela_referencia}'")
+        
         if not nome_tabela_ref or not campo_pk_ref:
             return JsonResponse({'error': 'Formato de tabela_referencia inválido'}, status=400)
         
@@ -1342,14 +1344,14 @@ def build_form_context(tabela, form=None, record_id=None, exists=False, initial_
                     fk_modal_tables[campo.nome_campo] = nome_tabela_ref
                     logger.info(f"[FK_BUTTON] {campo.nome_campo} -> modal {nome_tabela_ref} (campo_tabela: {campo_tabela}, campo_tela: {campo_tela or 'todos'})")
                 
-                    # Obtém mapeamento de campos relacionados se existir
+                    config = get_referencia_config(campo)
                     field_mapping = campo.get_campo_display_mapping()
-                    if field_mapping:
-                        fk_field_mappings[campo.nome_campo] = {
-                            'tabela_referencia': nome_tabela_ref,
-                            'tabela_referencia_dsl': campo.tabela_referencia,
-                            'mapping': field_mapping
-                        }
+                    fk_field_mappings[campo.nome_campo] = {
+                        'tabela_referencia': nome_tabela_ref,
+                        'tabela_referencia_dsl': campo.tabela_referencia,
+                        'campo_busca_referencia': config.get('campo_tabela') or campo_tabela,
+                        'mapping': field_mapping
+                    }
         
         # SEGUNDO: Processa campos com blur e chaves (lógica original)
         for campo in RppsEstrutura.objects.filter(nome_tabela=tabela).order_by('ordem_campo'):
