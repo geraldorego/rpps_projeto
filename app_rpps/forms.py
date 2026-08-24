@@ -14,10 +14,12 @@ from .metadata_helpers import (
     is_primary_key_field,
     normalize_reference_name,
     parse_tabela_referencia,
+    parse_referencia_config,
     parse_referencia_dependencias,
     validate_table_name,
     validate_column_name,
     validate_columns,
+    safe_model_filter,
 )
 
 logger = logging.getLogger(__name__)
@@ -145,7 +147,11 @@ class DynamicFormGenerator:
     
 
     def _resolve_value_and_label_fields(self, model_ref, campo=None):
-        """Resolve os campos de valor e rótulo a partir do metadado do campo ou do modelo."""
+        """Resolve os campos de valor e rótulo a partir do metadado do campo ou do modelo.
+
+        A regra principal é: quando existe campo_display_referencia, os campos devem seguir
+        exatamente o mapeamento definido no metadado, e não cair em candidatos genéricos como Nome.
+        """
         model_fields = {field.name for field in model_ref._meta.fields}
         pk_name = model_ref._meta.pk.name if model_ref._meta.pk else 'id'
 
@@ -154,17 +160,22 @@ class DynamicFormGenerator:
 
         if campo and campo.campo_display_referencia:
             mapping = campo.get_campo_display_mapping() or {}
+            mapped_ref_fields = []
+
             for local_field, ref_field in mapping.items():
-                if local_field == campo.nome_campo:
+                if local_field == campo.nome_campo and ref_field in model_fields:
                     value_field = ref_field
                     label_field = ref_field
                     break
-            if not value_field or value_field not in model_fields:
-                for ref_field in mapping.values():
-                    if ref_field in model_fields:
-                        value_field = ref_field
-                        label_field = ref_field
-                        break
+                if ref_field in model_fields:
+                    mapped_ref_fields.append(ref_field)
+
+            if value_field not in model_fields and mapped_ref_fields:
+                value_field = mapped_ref_fields[0]
+                label_field = mapped_ref_fields[0]
+
+            if value_field in model_fields:
+                return value_field, label_field or value_field
 
         if value_field not in model_fields:
             for candidate in ('Codigo', 'codigo', 'CPF', 'cpf', 'Cnpj', 'cnpj', 'id'):
@@ -179,6 +190,11 @@ class DynamicFormGenerator:
             if candidate in model_fields and candidate != value_field:
                 label_field = candidate
                 break
+
+        if value_field not in model_fields:
+            value_field = next(iter(model_fields), None)
+        if label_field not in model_fields:
+            label_field = value_field
 
         if label_field is None:
             label_field = value_field
@@ -234,7 +250,13 @@ class DynamicFormGenerator:
         dependencias = dependencias or {}
 
         try:
-            nome_tabela, campo_tabela, campo_tela = parse_tabela_referencia(valor)
+            config = parse_referencia_config(valor)
+            nome_tabela = config.get('tabela')
+            campo_tabela = config.get('campo_tabela')
+            campo_tela = config.get('campo_tela')
+
+            if not nome_tabela:
+                nome_tabela, campo_tabela, campo_tela = parse_tabela_referencia(valor)
             if not nome_tabela:
                 return []
 
@@ -244,9 +266,16 @@ class DynamicFormGenerator:
                 logger.warning(f"Modelo não encontrado para tabela_referencia: {nome_tabela_validada}")
                 return []
 
+            campos_modelo = {field.name for field in model_ref._meta.get_fields() if getattr(field, 'concrete', True)}
+            if campo_tabela:
+                campo_tabela_validado = validate_column_name(nome_tabela_validada, campo_tabela)
+                if campo_tabela_validado not in campos_modelo:
+                    logger.warning("Campo de referência %r rejeitado para tabela %r", campo_tabela, nome_tabela_validada)
+                    return []
+
             queryset = model_ref.objects.all()
 
-            mapeamento_dependencias = parse_referencia_dependencias(valor)
+            mapeamento_dependencias = config.get('filtros') or parse_referencia_dependencias(valor)
             if mapeamento_dependencias:
                 filtros = self._resolve_dependencias(mapeamento_dependencias, dependencias)
                 if len(filtros) != len(mapeamento_dependencias):
@@ -258,7 +287,7 @@ class DynamicFormGenerator:
                     )
                     return []
 
-                queryset = queryset.filter(**filtros)
+                queryset = queryset.filter(**safe_model_filter(model_ref, filtros))
 
             if not queryset.exists():
                 return []
@@ -388,6 +417,21 @@ class DynamicFormGenerator:
                 required=False,
                 initial=initial,
                 widget=forms.CheckboxInput(attrs={'class': 'form-check-input'})
+            )
+
+        elif tipo == 'disable':
+            attrs['readonly'] = 'readonly'
+            attrs['aria-readonly'] = 'true'
+            attrs['data-disable-field'] = 'true'
+            attrs['class'] = attrs.get('class', '') + ' campo-disable'
+            attrs['style'] = (
+                (attrs.get('style', '') + '; ') if attrs.get('style') else ''
+            ) + 'background-color: #e9ecef; cursor: not-allowed;'
+            return forms.CharField(
+                label=campo.label_campo,
+                required=False,
+                initial=initial,
+                widget=forms.TextInput(attrs=attrs)
             )
 
         else:

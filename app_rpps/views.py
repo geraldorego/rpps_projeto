@@ -1,5 +1,6 @@
 import logging
 import io
+import json
 import pandas as pd
 from django.http import HttpResponse
 from django.template.loader import render_to_string
@@ -43,10 +44,21 @@ from .metadata_helpers import (
     is_primary_key_field,
     is_foreign_key_field,
     parse_tabela_referencia,
+    parse_referencia_config,
+    get_referencia_config,
     validate_table_name,
     validate_column_name,
     validate_columns,
     get_allowed_columns,
+    validate_order_by,
+    validate_model_field_name,
+    validate_model_field_names,
+    safe_model_filter,
+)
+from .services import (
+    get_referencia_options,
+    safe_filter,
+    exportar_excel,
 )
 
 logger = logging.getLogger(__name__)
@@ -198,8 +210,16 @@ def report_view(request, tabela):
 
     queryset = model.objects.filter(**filter_kwargs)
 
+    field_names_validos = validate_model_field_names(model, field_names)
+    if not field_names_validos:
+        logger.warning("report_view: nenhum campo válido para %s; usando fallback 'id'", tabela)
+        field_names_validos = ['id']
+
+    # Uso do serviço de validação para manter a política centralizada
+    field_names_validos = [campo for campo in field_names_validos if validate_model_field_name(model, campo)]
+
     # Get records as a list of lists
-    records = list(queryset.values_list(*field_names))
+    records = list(queryset.values_list(*field_names_validos))
 
     return render(request, 'app_rpps/parciais/_report_grid.html', {
         'headers': headers,
@@ -247,57 +267,14 @@ def export_excel_view(request, tabela):
                 linha.append(val)
             valores.append(linha)
 
-        # 4) Monta Excel com openpyxl e aplica estilo corporativo
-        from openpyxl import Workbook
-        from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
-
-        wb = Workbook()
-        ws = wb.active
-        ws.title = 'Relatório'
-
-        # Estilos
-        azul = PatternFill(start_color='004A91', end_color='004A91', fill_type='solid')
-        branco = Font(color='FFFFFF', bold=True)
-        borda_fina = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-        alinhamento_centro = Alignment(vertical='center')
-
-        # Cabeçalho
-        for col_idx, header in enumerate(headers, start=1):
-            cell = ws.cell(row=1, column=col_idx, value=header)
-            cell.fill = azul
-            cell.font = branco
-            cell.border = borda_fina
-            cell.alignment = alinhamento_centro
-
-        # Dados
-        for row_idx, row in enumerate(valores, start=2):
-            for col_idx, value in enumerate(row, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=value)
-                cell.border = borda_fina
-
-        # Autoajuste de colunas
-        for col_idx in range(1, len(headers) + 1):
-            max_length = 0
-            for row_idx in range(1, total + 2):
-                value = ws.cell(row=row_idx, column=col_idx).value
-                length = len(str(value)) if value is not None else 0
-                if length > max_length:
-                    max_length = length
-            ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = max(10, min(60, max_length + 2))
-
-        # Saída
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
+        # Serviço de exportação para manter a lógica padronizada
+        response = exportar_excel(queryset, field_names)
 
         timestamp = timezone.localtime().strftime('%Y%m%d_%H%M')
         filename = f'Relatorio_{tabela}_{timestamp}.xlsx'
-
-        # Log corporativo
-        logger.info(f"[RELATÓRIO] {request.user.username} exportou '{tabela}' com {total} registros em {timezone.localtime()}")
-
-        response = HttpResponse(output.getvalue(), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        logger.info(f"[RELATÓRIO] {request.user.username} exportou '{tabela}' com {total} registros em {timezone.localtime()}")
         return response
 
     except Exception as e:
@@ -409,125 +386,212 @@ def export_pdf_view(request, tabela):
         return JsonResponse({'error': str(e)}, status=500)
 
 
+def rpps_list_view(request):
+    """View segura para a tela /RPPS/ com fallback de referencia_config e traceback completo."""
+    logger.info("[RPPS_VIEW] Processando view para tabela: RPPS")
+
+    try:
+        estrutura = RppsEstrutura.objects.filter(nome_tabela='RPPS').first()
+        if not estrutura:
+            logger.warning("[RPPS_VIEW] Estrutura RPPS não encontrada")
+            return HttpResponseNotFound("Estrutura não configurada")
+
+        config = get_referencia_config(estrutura)
+        if config and config.get('tabela'):
+            logger.info("[RPPS_VIEW] Configuração de referência resolvida para RPPS: %s", config)
+
+        campo_display = getattr(estrutura, 'campo_display_referencia', None) or 'id'
+        campo_validado = validate_model_field_name(RPPS, campo_display)
+
+        if campo_validado:
+            queryset = RPPS.objects.values('id', campo_validado)
+        else:
+            logger.warning("[RPPS_VIEW] Campo display inválido para RPPS: %r", campo_display)
+            queryset = RPPS.objects.values('id')
+
+        filtros = {}
+        for key, value in request.GET.items():
+            if key in {'csrfmiddlewaretoken',}:
+                continue
+            campo = validate_model_field_name(RPPS, key)
+            if campo is None:
+                logger.warning("[RPPS_VIEW] Campo rejeitado no filtro: %r", key)
+                continue
+            if value not in ('', None):
+                filtros[campo] = value
+
+        if filtros:
+            queryset = queryset.filter(**safe_model_filter(RPPS, filtros))
+
+        try:
+            queryset = queryset.order_by(campo_validado or 'id')
+        except Exception:
+            queryset = queryset.order_by('id')
+
+        registros = list(queryset[:50])
+        form = generate_dynamic_form('RPPS')()
+        context = build_form_context(
+            'RPPS',
+            form,
+            exists=False,
+            initial_context={
+                'is_new': True,
+                'registros': registros,
+                'config': config,
+                'tabela': 'RPPS',
+            },
+        )
+        return render(request, 'app_rpps/form_template.html', context)
+
+    except Exception:
+        logger.exception("[RPPS_VIEW] Erro ao processar /RPPS/")
+        raise
+
+
 def dynamic_form_view(request, tabela, extra_context=None):
     """View principal para exibição do formulário dinâmico"""
-    if tabela.lower() in ['favicon.ico', 'robots.txt', 'static']:
-        return HttpResponseNotFound()
-    
     logger.info(f"Acessando formulário para tabela: {tabela}")
 
-    MODEL_MAPPING = build_model_mapping()
-    model = MODEL_MAPPING.get(tabela)
+    try:
+        if tabela.lower() in ['favicon.ico', 'robots.txt', 'static']:
+            return HttpResponseNotFound()
 
-    if not model:
-        messages.error(request, f'Tabela {tabela} não encontrada no sistema')
-        return redirect('menu')
+        MODEL_MAPPING = build_model_mapping()
+        model = MODEL_MAPPING.get(tabela)
 
-    # Verifica se é modal simples (apenas formulário)
-    is_simple_modal = request.GET.get('modal') == 'simple'
+        if not model:
+            messages.error(request, f'Tabela {tabela} não encontrada no sistema')
+            return redirect('menu')
 
-    # Verifica se há ID ou campos chave na URL para carregar registro existente
-    record_id = request.GET.get('id')
-    if record_id:
-        try:
-            # Usa a PK dinâmica do modelo (pode ser 'id', 'CpfCnpj', etc)
+        # Verifica se é modal simples (apenas formulário)
+        is_simple_modal = request.GET.get('modal') == 'simple'
+
+        # Verifica se há ID ou campos chave na URL para carregar registro existente
+        record_id = request.GET.get('id')
+        if record_id:
+            try:
+                # Usa a PK dinâmica do modelo (pode ser 'id', 'CpfCnpj', etc)
+                pk_field = model._meta.pk.name
+                record = model.objects.get(**{pk_field: record_id})
+
+                # Se for modal simples, retorna apenas o formulário
+                if is_simple_modal:
+                    form_class = generate_dynamic_form(tabela)
+                    initial_data = {field.name: getattr(record, field.name) for field in record._meta.fields}
+
+                    # Aplica máscaras em campos documento
+                    initial_data = aplicar_mascaras_initial_data(tabela, initial_data, model)
+
+                    form = form_class(initial=initial_data)
+
+                    return render(request, 'app_rpps/partials/simple_form_modal.html', {
+                        'form': form,
+                        'tabela': tabela,
+                        'record_id': getattr(record, pk_field),
+                        'pk_field': pk_field,
+                    })
+
+                return render_form_with_record(request, tabela, record)
+            except model.DoesNotExist:
+                messages.warning(request, 'Registro não encontrado.')
+        else:
+            # Verifica campos chave
+            campos_chave = get_campos_chave(tabela)
+            if campos_chave:
+                filter_kwargs = {}
+                has_all_keys = True
+                for field in campos_chave:
+                    value = request.GET.get(field)
+                    if value:
+                        filter_kwargs[field] = value
+                    else:
+                        has_all_keys = False
+                        break
+
+                if has_all_keys and filter_kwargs:
+                    try:
+                        record = model.objects.filter(**filter_kwargs).first()
+                        if record:
+                            if is_simple_modal:
+                                form_class = generate_dynamic_form(tabela)
+                                initial_data = {field.name: getattr(record, field.name) for field in record._meta.fields}
+
+                                # Aplica máscaras em campos documento
+                                initial_data = aplicar_mascaras_initial_data(tabela, initial_data, model)
+
+                                form = form_class(initial=initial_data)
+
+                                pk_field = model._meta.pk.name
+                                return render(request, 'app_rpps/partials/simple_form_modal.html', {
+                                    'form': form,
+                                    'tabela': tabela,
+                                    'record_id': getattr(record, pk_field),
+                                    'pk_field': pk_field,
+                                })
+
+                            return render_form_with_record(request, tabela, record)
+                    except Exception as e:
+                        logger.error(f"Erro ao buscar registro: {e}")
+
+        # Se não encontrou registro, exibe formulário vazio
+        form = generate_dynamic_form(tabela)()
+
+        # Se for modal simples, retorna apenas o formulário
+        if is_simple_modal:
             pk_field = model._meta.pk.name
-            record = model.objects.get(**{pk_field: record_id})
-            
-            # Se for modal simples, retorna apenas o formulário
-            if is_simple_modal:
-                form_class = generate_dynamic_form(tabela)
-                initial_data = {field.name: getattr(record, field.name) for field in record._meta.fields}
-                
-                # Aplica máscaras em campos documento
-                initial_data = aplicar_mascaras_initial_data(tabela, initial_data, model)
-                
-                form = form_class(initial=initial_data)
-                
-                return render(request, 'app_rpps/partials/simple_form_modal.html', {
-                    'form': form,
-                    'tabela': tabela,
-                    'record_id': getattr(record, pk_field),
-                    'pk_field': pk_field,
-                })
-            
-            return render_form_with_record(request, tabela, record)
-        except model.DoesNotExist:
-            messages.warning(request, 'Registro não encontrado.')
-    else:
-        # Verifica campos chave
-        campos_chave = get_campos_chave(tabela)
-        if campos_chave:
-            filter_kwargs = {}
-            has_all_keys = True
-            for field in campos_chave:
-                value = request.GET.get(field)
-                if value:
-                    filter_kwargs[field] = value
-                else:
-                    has_all_keys = False
-                    break
-            
-            if has_all_keys and filter_kwargs:
-                try:
-                    record = model.objects.filter(**filter_kwargs).first()
-                    if record:
-                        if is_simple_modal:
-                            form_class = generate_dynamic_form(tabela)
-                            initial_data = {field.name: getattr(record, field.name) for field in record._meta.fields}
-                            
-                            # Aplica máscaras em campos documento
-                            initial_data = aplicar_mascaras_initial_data(tabela, initial_data, model)
-                            
-                            form = form_class(initial=initial_data)
-                            
-                            pk_field = model._meta.pk.name
-                            return render(request, 'app_rpps/partials/simple_form_modal.html', {
-                                'form': form,
-                                'tabela': tabela,
-                                'record_id': getattr(record, pk_field),
-                                'pk_field': pk_field,
-                            })
-                        
-                        return render_form_with_record(request, tabela, record)
-                except Exception as e:
-                    logger.error(f"Erro ao buscar registro: {e}")
+            return render(request, 'app_rpps/partials/simple_form_modal.html', {
+                'form': form,
+                'tabela': tabela,
+                'record_id': None,
+                'pk_field': pk_field,
+            })
 
-    # Se não encontrou registro, exibe formulário vazio
-    form = generate_dynamic_form(tabela)()
-    
-    # Se for modal simples, retorna apenas o formulário
-    if is_simple_modal:
-        pk_field = model._meta.pk.name
-        return render(request, 'app_rpps/partials/simple_form_modal.html', {
-            'form': form,
-            'tabela': tabela,
-            'record_id': None,
-            'pk_field': pk_field,
-        })
-    
-    return render(request, 'app_rpps/form_template.html', 
-                 build_form_context(tabela, form, exists=False, 
-                                  initial_context={'is_new': True}))
+        return render(request, 'app_rpps/form_template.html',
+                     build_form_context(tabela, form, exists=False,
+                                      initial_context={'is_new': True}))
+    except Exception:
+        logger.exception("[DYNAMIC_FORM_VIEW] Erro ao processar %s", tabela)
+        raise
 
 
 def filter_foreignkey_options(request, tabela_ref):
     """Endpoint para filtro AJAX das ForeignKeys"""
     search_term = request.GET.get('search', '').strip()
     campo_display = request.GET.get('campo_display', 'nome')
-    
+
     if len(search_term) < 3:
         return JsonResponse({'results': []})
-    
+
     model_ref = MODEL_MAPPING.get(tabela_ref)
     if not model_ref:
         return JsonResponse({'error': 'Tabela não encontrada'}, status=404)
-    
+
     try:
-        filtro = Q(**{f'{campo_display}__icontains': search_term})
-        registros = model_ref.objects.filter(filtro).values('id', campo_display)[:20]
-        results = [{'id': r['id'], 'text': r[campo_display]} for r in registros]
-        
+        filtros = {}
+        if request.GET.get('filtros'):
+            try:
+                filtros = json.loads(request.GET.get('filtros'))
+            except Exception:
+                filtros = {}
+
+        campo_validado = validate_model_field_name(model_ref, campo_display)
+        if campo_validado is None:
+            logger.warning("filter_foreignkey_options: campo_display rejeitado para %s: %r", tabela_ref, campo_display)
+            return JsonResponse({'results': []})
+
+        registros = get_referencia_options(
+            model_ref,
+            campo_validado,
+            search_term=search_term,
+            filtros=safe_filter(model_ref, filtros),
+        )[:20]
+
+        results = []
+        for registro in registros:
+            pk_value = registro.get('id', registro.get(model_ref._meta.pk.name))
+            text_value = registro.get(campo_validado, pk_value)
+            results.append({'id': pk_value, 'text': text_value})
+
         return JsonResponse({'results': results})
     except Exception as e:
         logger.error(f"Erro no filtro FK {tabela_ref}: {str(e)}")
@@ -569,9 +633,11 @@ def get_related_fields_data(request, tabela, campo_fk):
         if not tabela_referencia:
             return JsonResponse({'error': 'Tabela de referência não configurada'}, status=400)
         
-        # Extrai nome da tabela do formato "Tabela(CampoTabela=CampoTela)"
-        nome_tabela_ref, campo_tabela, campo_tela = parse_tabela_referencia(tabela_referencia)
-        
+        config = get_referencia_config(campo_estrutura)
+        nome_tabela_ref = config.get('tabela') or parse_tabela_referencia(tabela_referencia)[0]
+        campo_tabela = config.get('campo_tabela') or parse_tabela_referencia(tabela_referencia)[1]
+        campo_tela = config.get('campo_tela') or parse_tabela_referencia(tabela_referencia)[2]
+
         if not nome_tabela_ref:
             return JsonResponse({'error': f'Formato inválido de tabela_referencia: {tabela_referencia}'}, status=400)
         
@@ -586,7 +652,7 @@ def get_related_fields_data(request, tabela, campo_fk):
             return JsonResponse({'error': 'Registro não encontrado na tabela de referência'}, status=404)
         
         # Obtém mapeamento de campos (ex: {'a': 'CPF', 'b': 'endereco', 'c': 'nome'})
-        mapping = campo_estrutura.get_campo_display_mapping()
+        mapping = resolve_fk_display_mapping(campo_estrutura, campo_fk=campo_fk, tabela_ref=tabela_referencia)
         
         if not mapping:
             # Se não houver mapeamento, retorna apenas o campo padrão
@@ -672,6 +738,30 @@ def load_referencia(request, tabela, campo_ref):
 
 logger = logging.getLogger(__name__)
 
+
+def resolve_fk_display_mapping(campo_estrutura, campo_fk=None, tabela_ref=None):
+    """Resolve o mapeamento de retorno do FK respeitando o metadado do campo."""
+    if not campo_estrutura:
+        return {}
+
+    mapping = campo_estrutura.get_campo_display_mapping() or {}
+    if mapping:
+        return mapping
+
+    config = get_referencia_config(campo_estrutura)
+    campo_tela = config.get('campo_tela')
+    if campo_tela:
+        return {campo_tela: campo_tela}
+
+    if campo_fk:
+        return {campo_fk: campo_fk}
+
+    if tabela_ref:
+        return {tabela_ref: tabela_ref}
+
+    return {}
+
+
 @require_http_methods(["GET"])
 def check_fk_field(request, tabela, campo_fk):
     """
@@ -685,7 +775,14 @@ def check_fk_field(request, tabela, campo_fk):
             nome_campo=campo_fk
         ).first()
         
+        logger.info(
+            f"[CHECK_FK] 🖱️ Blur disparado em '{tabela}.{campo_fk}' | "
+            f"tabela_referencia={campo_config.tabela_referencia if campo_config else None!r} | "
+            f"campo_display_referencia={campo_config.campo_display_referencia if campo_config else None!r}"
+        )
+
         if not campo_config or not campo_config.tabela_referencia:
+            logger.warning(f"[CHECK_FK] ⛔ Campo '{campo_fk}' sem tabela_referencia configurada em RppsEstrutura")
             return JsonResponse({'error': 'Campo FK não configurado'}, status=400)
         
         # Pega o valor digitado
@@ -696,9 +793,15 @@ def check_fk_field(request, tabela, campo_fk):
         
         logger.info(f"[CHECK_FK] Buscando '{campo_fk}'='{valor_digitado}' em '{campo_config.tabela_referencia}'")
         
-        # Parse do formato "Cadastro(CpfCnpj)"
-        nome_tabela_ref, campo_pk_ref, _ = parse_tabela_referencia(campo_config.tabela_referencia)
-        
+        config = get_referencia_config(campo_config)
+        nome_tabela_ref = config.get('tabela')
+        campo_pk_ref = config.get('campo_tabela')
+
+        if not nome_tabela_ref or not campo_pk_ref:
+            fallback = parse_tabela_referencia(campo_config.tabela_referencia)
+            nome_tabela_ref = nome_tabela_ref or fallback[0]
+            campo_pk_ref = campo_pk_ref or fallback[1]
+
         if not nome_tabela_ref or not campo_pk_ref:
             return JsonResponse({'error': 'Formato de tabela_referencia inválido'}, status=400)
         
@@ -708,12 +811,17 @@ def check_fk_field(request, tabela, campo_fk):
         
         # Remove máscara do documento antes de buscar
         valor_sem_mascara = valor_digitado.replace('.', '').replace('-', '').replace('/', '')
-        
+
+        campo_pk_ref_validado = validate_model_field_name(model_ref, campo_pk_ref)
+        if campo_pk_ref_validado is None:
+            logger.warning("[CHECK_FK] campo_pk_ref rejeitado para %s: %r", nome_tabela_ref, campo_pk_ref)
+            return JsonResponse({'error': 'Campo de referência inválido'}, status=400)
+
         # Busca na tabela de referência
-        registro_ref = model_ref.objects.filter(**{campo_pk_ref: valor_sem_mascara}).first()
-        
+        registro_ref = model_ref.objects.filter(**{campo_pk_ref_validado: valor_sem_mascara}).first()
+
         if not registro_ref:
-            logger.warning(f"[CHECK_FK] ❌ Registro não encontrado em '{nome_tabela_ref}' com {campo_pk_ref}={valor_sem_mascara}")
+            logger.warning(f"[CHECK_FK] ❌ Registro não encontrado em '{nome_tabela_ref}' com {campo_pk_ref_validado}={valor_sem_mascara}")
             return JsonResponse({
                 'found': False,
                 'message': f'Registro não encontrado em {nome_tabela_ref}'
@@ -829,14 +937,24 @@ def check_record(request, tabela):
                 mapped_data = record_data
                 if parent_table:
                     logger.info(f"[CHECK_RECORD] Aplicando mapeamento para parent_table={parent_table}")
-                    # Busca configuração do campo FK na tabela pai que referencia esta tabela
-                    campo_fk_config = RppsEstrutura.objects.filter(
-                        nome_tabela=parent_table,
-                        tabela_referencia__icontains=tabela
-                    ).first()
+                    campo_fk_name = request.GET.get('field_name', '').strip() or request.GET.get('campo_fk', '').strip()
+                    campo_fk_config = None
+
+                    if campo_fk_name:
+                        campo_fk_config = RppsEstrutura.objects.filter(
+                            nome_tabela=parent_table,
+                            nome_campo=campo_fk_name
+                        ).first()
+                    if not campo_fk_config:
+                        campo_fk_config = RppsEstrutura.objects.filter(
+                            nome_tabela=parent_table,
+                            tabela_referencia__icontains=tabela
+                        ).first()
                     
-                    if campo_fk_config and campo_fk_config.campo_display_referencia:
-                        mapping = campo_fk_config.get_campo_display_mapping() or {}
+                    if campo_fk_config:
+                        mapping = resolve_fk_display_mapping(campo_fk_config, campo_fk=campo_fk_name or campo_fk_config.nome_campo, tabela_ref=tabela)
+                        if not mapping and campo_fk_config.campo_display_referencia:
+                            mapping = campo_fk_config.get_campo_display_mapping() or {}
                         try:
                             # Garante que o campo FK local receba o valor da PK da referência se não estiver no mapping
                             ref_model = MODEL_MAPPING.get(tabela)
@@ -902,9 +1020,15 @@ def check_record(request, tabela):
             if valor_digitado:
                 logger.info(f"[CHECK_RECORD] Buscando '{campo_fk.nome_campo}'='{valor_digitado}' em '{campo_fk.tabela_referencia}'")
                 
-                # Parse do formato "Cadastro(CpfCnpj)"
-                nome_tabela_ref, campo_pk_ref, _ = parse_tabela_referencia(campo_fk.tabela_referencia)
-                
+                config = get_referencia_config(campo_fk)
+                nome_tabela_ref = config.get('tabela')
+                campo_pk_ref = config.get('campo_tabela')
+
+                if not nome_tabela_ref or not campo_pk_ref:
+                    fallback = parse_tabela_referencia(campo_fk.tabela_referencia)
+                    nome_tabela_ref = nome_tabela_ref or fallback[0]
+                    campo_pk_ref = campo_pk_ref or fallback[1]
+
                 if nome_tabela_ref and campo_pk_ref:
                     model_ref = MODEL_MAPPING.get(nome_tabela_ref)
                     
@@ -912,11 +1036,16 @@ def check_record(request, tabela):
                         # Remove máscara do documento antes de buscar
                         valor_sem_mascara = valor_digitado.replace('.', '').replace('-', '').replace('/', '')
                         
+                        campo_pk_ref_validado = validate_model_field_name(model_ref, campo_pk_ref)
+                        if campo_pk_ref_validado is None:
+                            logger.warning("[CHECK_RECORD] campo_pk_ref rejeitado para %s: %r", nome_tabela_ref, campo_pk_ref)
+                            continue
+
                         # Busca na tabela de referência
-                        registro_ref = model_ref.objects.filter(**{campo_pk_ref: valor_sem_mascara}).first()
-                        
+                        registro_ref = model_ref.objects.filter(**{campo_pk_ref_validado: valor_sem_mascara}).first()
+
                         if registro_ref:
-                            logger.info(f"[CHECK_RECORD] ✅ Registro encontrado em '{nome_tabela_ref}': {campo_pk_ref}={valor_sem_mascara}")
+                            logger.info(f"[CHECK_RECORD] ✅ Registro encontrado em '{nome_tabela_ref}': {campo_pk_ref_validado}={valor_sem_mascara}")
                             
                             # Obtém mapeamento de campos
                             field_mapping = campo_fk.get_campo_display_mapping()
@@ -1081,59 +1210,41 @@ def build_filter_kwargs(request, tabela, campos_chave):
 
 def render_form_with_record(request, tabela, record, campos_chave=None):
     pk_value = getattr(record, record._meta.pk.name)
-    print(f"\n[RENDER_FORM] Iniciando para tabela '{tabela}' com PK={pk_value}")
-    
-    # Prepara os dados iniciais com formatação adequada
+    logger.debug("Renderizando formulário da tabela %s com registro %s", tabela, pk_value)
+
     initial_data = {}
     campos_varchar5 = RppsEstrutura.objects.filter(nome_tabela=tabela, tipo_campo='varchar5')
-    
-    # Lista de campos que devem ser formatados como CPF/CNPJ
     campos_documento = ['CPF', 'CNPJ', 'CNPJEnteFederativo', 'CNPJRPPS', 'CPFAtuario', 'CNPJPagador', 'CNPJOrgaoParcelamento', 'CNPJAtivo', 'CpfCnpj']
 
-    # Itera sobre todos os campos do registro
     for field in record._meta.fields:
         field_name = field.name
         field_value = getattr(record, field_name)
-        
-        # Se o campo é uma ForeignKey para Cadastro, extrai o CpfCnpj
+
         if hasattr(field, 'related_model') and field.related_model and field.related_model.__name__ == 'Cadastro':
             if field_value:
-                # Pega o CpfCnpj do objeto Cadastro relacionado
                 initial_data[field_name] = field_value.CpfCnpj
-                print(f"[RENDER_FORM] FK Campo '{field_name}': {field_value.CpfCnpj}")
+                logger.debug("Campo FK configurado para %s com relacionamento de cadastro", field_name)
             else:
                 initial_data[field_name] = None
-                print(f"[RENDER_FORM] FK Campo '{field_name}': NULL")
+                logger.debug("Campo FK %s sem valor no relacionamento de cadastro", field_name)
         else:
-            # Para campos normais, pega o valor direto
             initial_data[field_name] = field_value
-            if field_name in campos_documento:
-                print(f"[RENDER_FORM] Campo normal '{field_name}': {field_value}")
-    
-    # Aplica formatação para campos varchar5
+
     for campo in campos_varchar5:
         nome_campo = campo.nome_campo
         if nome_campo in initial_data and initial_data[nome_campo]:
-            # Se o campo for um dos que precisa de formatação de documento
             if nome_campo in campos_documento:
                 valor_formatado = aplicar_mascara_documento(initial_data[nome_campo])
-                print(f"[RENDER_FORM] Formatando '{nome_campo}': {initial_data[nome_campo]} -> {valor_formatado}")
                 initial_data[nome_campo] = valor_formatado
-            # Para outros campos varchar5, mantém apenas números
             else:
                 initial_data[nome_campo] = re.sub(r'\D', '', str(initial_data[nome_campo]))
 
-    print(f"[RENDER_FORM] Total de campos no initial_data: {len(initial_data)}")
-    
-    # Gera o form com dados iniciais formatados
     form = generate_dynamic_form(tabela)(initial=initial_data)
-
-    # Constrói o contexto com build_form_context e sobrescreve campos_chave se fornecido
     context = build_form_context(tabela, form, pk_value, True)
     if campos_chave is not None:
         context['campos_chave'] = campos_chave
-    
-    print(f"[RENDER_FORM] Contexto construído com sucesso\n")
+
+    logger.debug("Contexto do formulário montado para %s", tabela)
     return render(request, 'app_rpps/form_template.html', context)
 
 
@@ -1271,12 +1382,17 @@ def build_form_context(tabela, form=None, record_id=None, exists=False, initial_
                                     
                                     # Pre-carrega FKs apenas se não estivermos lidando com erro/HTMX
                                     if not initial_context:
-                                        try:
-                                            registros = model_ref.objects.all().values('id', campo_display).order_by(campo_display)
-                                            campos_foreign_keys[campo.nome_campo] = list(registros)
-                                        except Exception as e:
-                                            logger.warning(f"Erro ao pré-carregar FK {campo.nome_campo}: {str(e)}")
+                                        campo_display_validado = validate_model_field_name(model_ref, campo_display)
+                                        if campo_display_validado is None:
+                                            logger.warning("build_form_context: campo_display rejeitado para %s.%s: %r", nome_tabela_ref, campo.nome_campo, campo_display)
                                             campos_foreign_keys[campo.nome_campo] = []
+                                        else:
+                                            try:
+                                                registros = model_ref.objects.all().values('id', campo_display_validado).order_by(campo_display_validado)
+                                                campos_foreign_keys[campo.nome_campo] = list(registros)
+                                            except Exception as e:
+                                                logger.warning(f"Erro ao pré-carregar FK {campo.nome_campo}: {str(e)}")
+                                                campos_foreign_keys[campo.nome_campo] = []
                                 
                                 campos_chave.append(campo.nome_campo)
                                 continue
@@ -1368,100 +1484,76 @@ def handle_form_action(request, model, form, record_id):
     elif acao == 'salvar':
         if not form:
             raise ValueError("Formulário não fornecido para salvamento")
-            
+
         cleaned_data = form.cleaned_data
-        print(f"\n[SAVE] Dados limpos recebidos: {cleaned_data}")
-        
-        # Filtra apenas campos que existem no modelo (segurança contra campos inválidos em RppsEstrutura)
+        logger.debug("Dados limpos recebidos para salvamento no modelo %s", model.__name__)
+
         campos_validos = {f.name for f in model._meta.fields}
         cleaned_data_filtrado = {k: v for k, v in cleaned_data.items() if k in campos_validos}
-        
-        # Log de campos removidos (se houver)
+
         campos_removidos = set(cleaned_data.keys()) - set(cleaned_data_filtrado.keys())
         if campos_removidos:
-            logger.warning(f"[SAVE] Campos removidos por não existirem no modelo {model.__name__}: {campos_removidos}")
-            print(f"[SAVE] Campos removidos (não existem no modelo): {campos_removidos}")
-        
+            logger.warning("Campos removidos por não existirem no modelo %s: %s", model.__name__, sorted(campos_removidos))
+
         cleaned_data = cleaned_data_filtrado
-        
-        # Remove máscaras APENAS dos campos de documento (CPF/CNPJ), preservando sinais de negativo em campos numéricos
-        campos_documento = ['CNPJPagador', 'CNPJEnteFederativo', 'CPF', 'CPFAtuario', 'CNPJ', 'CNPJRPPS', 
+
+        campos_documento = ['CNPJPagador', 'CNPJEnteFederativo', 'CPF', 'CPFAtuario', 'CNPJ', 'CNPJRPPS',
                            'CNPJOrgaoParcelamento', 'CNPJAtivo', 'CpfCnpj']
         for campo in campos_documento:
             if campo in cleaned_data and cleaned_data[campo]:
-                # Remove APENAS caracteres de máscara de documento (. - /), mantendo dígitos
                 cleaned_data[campo] = re.sub(r'[.\-/]', '', cleaned_data[campo])
-                print(f"[SAVE] Máscara removida de '{campo}': {cleaned_data[campo]}")
-        
-        # Detecta a chave primária do modelo e remove máscara se for documento
+                logger.debug("Máscara removida do campo %s", campo)
+
         pk_field = model._meta.pk.name
         if pk_field in cleaned_data and cleaned_data[pk_field]:
-            # Se a PK for um campo de documento (CPF/CNPJ), remove máscara
             pk_value_str = str(cleaned_data[pk_field])
-            if re.search(r'[.\-/]', pk_value_str):  # Contém caracteres de máscara
-                # Remove apenas caracteres de máscara, não todos os não-dígitos
-                if pk_field in campos_documento:
-                    cleaned_data[pk_field] = re.sub(r'[.\-/]', '', pk_value_str)
-                    print(f"[SAVE] Máscara removida da PK '{pk_field}': {cleaned_data[pk_field]}")
-        
-        # Converte valores de CPF/CNPJ em instâncias de Cadastro para campos ForeignKey
+            if re.search(r'[.\-/]', pk_value_str) and pk_field in campos_documento:
+                cleaned_data[pk_field] = re.sub(r'[.\-/]', '', pk_value_str)
+                logger.debug("Máscara removida da chave primária %s", pk_field)
+
         for field in model._meta.fields:
             field_name = field.name
             if field_name in cleaned_data:
-                # Verifica se é uma ForeignKey para Cadastro
                 if hasattr(field, 'related_model') and field.related_model and field.related_model.__name__ == 'Cadastro':
                     cpf_cnpj_valor = cleaned_data[field_name]
                     if cpf_cnpj_valor:
-                        # Remove máscara se ainda houver (apenas caracteres de máscara, não dígitos)
                         cpf_cnpj_limpo = re.sub(r'[.\-/]', '', str(cpf_cnpj_valor))
-                        print(f"[SAVE] FK Campo '{field_name}': buscando Cadastro com CpfCnpj={cpf_cnpj_limpo}")
-                        
                         try:
-                            # Busca ou cria a instância de Cadastro
                             cadastro_obj = Cadastro.objects.get(CpfCnpj=cpf_cnpj_limpo)
                             cleaned_data[field_name] = cadastro_obj
-                            # Usa a chave primária correta (CpfCnpj para Cadastro, id para outros)
-                            pk_value = getattr(cadastro_obj, cadastro_obj._meta.pk.name)
-                            print(f"[SAVE] FK Campo '{field_name}': Cadastro encontrado (PK={pk_value})")
+                            logger.debug("Relacionamento resolvido para %s via Cadastro", field_name)
                         except Cadastro.DoesNotExist:
                             raise ValueError(f"CPF/CNPJ {cpf_cnpj_limpo} não encontrado na tabela Cadastro. Por favor, cadastre-o primeiro.")
                     else:
                         cleaned_data[field_name] = None
 
-        print(f"[SAVE] Dados processados para salvar: {cleaned_data}")
+        logger.debug("Dados processados para salvamento no modelo %s", model.__name__)
 
-        # Detecta a chave primária do modelo
         pk_field = model._meta.pk.name
-        
+
         if record_id:
-            # EDIÇÃO: Usa o record_id da URL (já sem máscara) ao invés do valor do form
-            # Remove o campo PK do cleaned_data para não tentar atualizá-lo
             if pk_field in cleaned_data:
                 del cleaned_data[pk_field]
-                print(f"[SAVE] Campo PK '{pk_field}' removido do cleaned_data (usando record_id da URL)")
-            
-            # Busca o registro existente
+                logger.debug("Campo PK %s removido do payload de atualização", pk_field)
+
             record = get_object_or_404(model, **{pk_field: record_id})
-            
-            # Atualiza apenas os outros campos
+
             for field, value in cleaned_data.items():
                 setattr(record, field, value)
             record.save()
-            print(f"[SAVE] Registro {record_id} atualizado com sucesso")
+            logger.info("Registro %s atualizado com sucesso na tabela %s", record_id, model.__name__)
             return {'success': True, 'message': 'Registro atualizado com sucesso!', 'action': 'update', 'record_id': record_id}
         else:
-            # CRIAÇÃO: Usa todos os campos do cleaned_data
             record = model.objects.create(**cleaned_data)
-            # Usa a chave primária correta para exibir o ID
             pk_value = getattr(record, pk_field)
-            print(f"[SAVE] Novo registro criado com {pk_field}={pk_value}")
+            logger.info("Novo registro criado com sucesso na tabela %s", model.__name__)
             return {'success': True, 'message': 'Registro criado com sucesso!', 'action': 'create', 'record_id': pk_value}
 
 def tratamento_record(request, tabela, record_id=None):
     """View unificada para tratamento de CRUD"""
     try:
-        print(f'[DEBUG] tratamento_record chamado - Tabela: {tabela}, Method: {request.method}, POST data: {request.POST.dict()}')
-        
+        logger.debug("tratamento_record iniciado para tabela %s via %s", tabela, request.method)
+
         model = MODEL_MAPPING.get(tabela)
         if not model:
             messages.error(request, _('Modelo não encontrado.'))
@@ -1469,11 +1561,10 @@ def tratamento_record(request, tabela, record_id=None):
 
         if request.method == 'POST':
             acao = request.POST.get('acao')
-            print(f'[DEBUG] Ação detectada: {acao}')
+            logger.debug("Ação %s executada para tabela %s", acao, tabela)
 
             if acao == 'consultar':
                 campos_chave = get_campos_chave(tabela)
-                # Use request.POST instead of request.GET for build_filter_kwargs
                 filter_kwargs = {}
                 for field in campos_chave:
                     value = request.POST.get(field)
@@ -1488,13 +1579,12 @@ def tratamento_record(request, tabela, record_id=None):
                     return render(request, 'app_rpps/form_template.html', build_form_context(tabela, form, exists=False))
 
             if request.POST.get('acao') == 'gerar_xml':
-                print('[DEBUG] Detectado acao=gerar_xml')
-                return gerar_xml_view(request, tabela)                
-            
+                logger.info("Ação gerar_xml disparada para tabela %s", tabela)
+                return gerar_xml_view(request, tabela)
+
             if acao == 'excluir':
                 try:
                     result = handle_form_action(request, model, None, record_id)
-                    # Se for AJAX, retorna JSON
                     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
                         return JsonResponse(result)
                     messages.success(request, result.get('message', 'Registro excluído com sucesso!'))
@@ -1504,28 +1594,23 @@ def tratamento_record(request, tabela, record_id=None):
                         return JsonResponse({'success': False, 'message': str(e)}, status=400)
                     messages.error(request, _('Erro ao excluir registro: ') + str(e))
                     return redirect(reverse('dynamic_form', kwargs={'tabela': tabela}))
-            
+
             form = generate_dynamic_form(tabela)(request.POST)
             if form.is_valid():
                 try:
                     result = handle_form_action(request, model, form, record_id)
-                    
-                    # Se for AJAX, retorna JSON
+
                     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
                         return JsonResponse(result)
-                    
-                    # Se não for AJAX, usa messages e redireciona
+
                     messages.success(request, result.get('message', 'Operação realizada com sucesso!'))
                     return redirect(reverse('dynamic_form', kwargs={'tabela': tabela}))
                 except Exception as e:
-                    # Se for AJAX, retorna JSON de erro
                     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
                         return JsonResponse({'success': False, 'message': str(e)}, status=400)
                     messages.error(request, _('Erro ao processar o registro: ') + str(e))
             else:
-                # Se for AJAX e form inválido, retorna o HTML do form com erros
                 if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                    # Renderiza apenas o formulário simples com erros
                     pk_field = model._meta.pk.name
                     return render(request, 'app_rpps/partials/simple_form_modal.html', {
                         'form': form,
@@ -1534,9 +1619,9 @@ def tratamento_record(request, tabela, record_id=None):
                         'pk_field': pk_field,
                     })
                 return handle_invalid_form(request, form, tabela, record_id)
-        
+
         return redirect(reverse('dynamic_form', kwargs={'tabela': tabela}))
-        
+
     except Exception as e:
         logger.error(f"Erro em tratamento_record: {str(e)}", exc_info=True)
         messages.error(request, _('Ocorreu um erro inesperado.'))
@@ -1631,7 +1716,17 @@ def buscar_registros(request, ano_ref, mes_ref, TipoFundo, nome_tabela, campo_fi
     if campo_filter:
         try:
             if campo_filter.strip():
-                filtros_adicionais_config = dict(item.strip().split('=') for item in campo_filter.split(',') if '=' in item)
+                filtros_adicionais_config = {}
+                for item in campo_filter.split(','):
+                    item = item.strip()
+                    if not item or '=' not in item:
+                        continue
+                    campo_sql_raw, campo_tela_raw = item.split('=', 1)
+                    campo_sql = campo_sql_raw.strip()
+                    campo_tela = campo_tela_raw.strip()
+                    if not campo_sql or not campo_tela:
+                        raise ValueError(f"Parâmetro de campo_filter inválido: {item!r}")
+                    filtros_adicionais_config[campo_sql] = campo_tela
 
                 for campo_sql, campo_tela in filtros_adicionais_config.items():
                     campo_sql_validado = validate_column_name(tabela_validada, campo_sql)
@@ -1697,18 +1792,15 @@ def gerar_arquivo_xml(nome_tabela, campos_xml, registros, dados_fundo, TipoFundo
        - 5: Todos EXCETO 3 (2 blocos: 1+2)
     """
     try:
-        print(f'[DEBUG-GERAR-XML] Tabela: {nome_tabela}, TipoFundo: {TipoFundo}')
-        print(f'[DEBUG-GERAR-XML] dados_fundo: {dados_fundo}')
-        print(f'[DEBUG-GERAR-XML] Qtd registros: {len(registros) if registros else 0}')
-        
-        # Mapeamento UG por TipoFundo
+        logger.debug("Gerando XML para tabela %s com TipoFundo %s", nome_tabela, TipoFundo)
+        logger.debug("Quantidade de registros recebidos para %s: %s", nome_tabela, len(registros) if registros else 0)
+
         mapa_ug = {
-            1: 130570,  # Previdenciário
-            2: 130571,  # Financeiro
-            3: 130572,  # Alagoas Previdência
+            1: 130570,
+            2: 130571,
+            3: 130572,
         }
-        
-        # Determina quais UGs precisam ser gerados
+
         ugs_para_gerar = []
         if TipoFundo == 1:
             ugs_para_gerar = [1]
@@ -1717,58 +1809,49 @@ def gerar_arquivo_xml(nome_tabela, campos_xml, registros, dados_fundo, TipoFundo
         elif TipoFundo == 3:
             ugs_para_gerar = [3]
         elif TipoFundo == 4:
-            ugs_para_gerar = [1, 2, 3]  # TODOS
+            ugs_para_gerar = [1, 2, 3]
         elif TipoFundo == 5:
-            ugs_para_gerar = [1, 2]  # Todos EXCETO 3
+            ugs_para_gerar = [1, 2]
         else:
-            # Fallback: usa dados_fundo se TipoFundo não for reconhecido
             if dados_fundo and len(dados_fundo) >= 3:
                 ugs_para_gerar = [TipoFundo]
             else:
-                print(f'[DEBUG-GERAR-XML] ⚠️ TipoFundo inválido e dados_fundo incompleto!')
+                logger.warning("TipoFundo inválido e dados_fundo incompleto para %s", nome_tabela)
                 return False
-        
+
         exercicio = str(dados_fundo[0]) if (dados_fundo and dados_fundo[0]) else None
         mes = str(dados_fundo[1]).zfill(2) if (dados_fundo and dados_fundo[1]) else None
-        
+
         if not exercicio or not mes:
-            print(f'[DEBUG-GERAR-XML] ❌ ERRO: Exercicio ou Mes faltando!')
+            logger.warning("Dados do fundo incompletos para tabela %s", nome_tabela)
             return False
-        
-        # Se TipoFundo != 4 e != 5, gera apenas um SIAP
-        # Se TipoFundo == 4 ou 5, precisa gerar múltiplos XMLs (um arquivo por UG)
+
         if TipoFundo in [4, 5]:
-            # Para TipoFundo 4 e 5, vai gerar múltiplos arquivos/XMLs
             xml_contents = []
             for tipo_ug in ugs_para_gerar:
                 ug = mapa_ug[tipo_ug]
                 xml_str = _gerar_siap_bloco(nome_tabela, campos_xml, registros, exercicio, mes, ug)
                 xml_contents.append(xml_str)
-            
-            # Combina todos os blocos em um único arquivo
+
             xml_completo = '<?xml version=\'1.0\' encoding=\'UTF-8\'?>\n' + '\n'.join(xml_contents)
         else:
-            # Para TipoFundo 1, 2, 3: gera um único SIAP com o UG correto
             ug = dados_fundo[2] if (dados_fundo and len(dados_fundo) >= 3) else mapa_ug.get(TipoFundo)
             xml_completo = _gerar_siap_bloco(nome_tabela, campos_xml, registros, exercicio, mes, ug)
-        
-        # Salva arquivo
+
         xml_filename = f"{nome_tabela}.xml"
         output_dir = settings.MEDIA_ROOT
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         xml_path = os.path.join(output_dir, xml_filename)
-        
+
         with open(xml_path, 'w', encoding='utf-8') as f:
             f.write(xml_completo)
-        
-        logger.info(f"✅ XML para '{nome_tabela}' gerado com sucesso em '{xml_path}'")
-        print(f'[DEBUG-GERAR-XML] ✅ Arquivo gerado: {xml_path}')
+
+        logger.info("XML para %s gerado com sucesso em %s", nome_tabela, xml_path)
         return True
-        
+
     except Exception as e:
-        logger.error(f"❌ Erro ao gerar XML para {nome_tabela}: {e}", exc_info=True)
-        print(f'[DEBUG-GERAR-XML] ❌ ERRO: {str(e)}')
+        logger.error(f"Erro ao gerar XML para {nome_tabela}: {e}", exc_info=True)
         return False
 
 
@@ -1873,26 +1956,17 @@ def _process_xml_generation(request, nome_tabela, campo_filter, dados_fundo, ano
 
 def gerar_xml_view(request, tabela):
     try:
-        # DEBUG COMPLETO
-        print(f'[DEBUG-XML] ========== INÍCIO gerar_xml_view ==========')
-        print(f'[DEBUG-XML] Tabela: {tabela}')
-        print(f'[DEBUG-XML] Método: {request.method}')
-        print(f'[DEBUG-XML] POST completo: {dict(request.POST)}')
-        print(f'[DEBUG-XML] GET completo: {dict(request.GET)}')
-        print(f'[DEBUG-XML] ============================================')
-        
+        logger.info("Início da geração de XML para tabela %s via %s", tabela, request.method)
+
         resultado = []
-        
-        # Tenta buscar dados do POST primeiro, depois do GET
+
         ano_ref = request.POST.get('ano_ref') or request.GET.get('ano_ref')
         mes_ref = request.POST.get('mes_ref') or request.GET.get('mes_ref')
         TipoXml = request.POST.get('TipoXml') or request.GET.get('TipoXml')
         TipoFundo = request.POST.get('TipoFundo') or request.GET.get('TipoFundo')
-        
-        print(f'[DEBUG] CHEGUEI 1 - Início da geração de XMLs')
-        print(f'[DEBUG] Parâmetros recebidos: ano_ref={ano_ref}, mes_ref={mes_ref}, TipoXml={TipoXml}, TipoFundo={TipoFundo}')
-        
-        # Converte parâmetros para inteiros
+
+        logger.debug("Parâmetros de geração XML recebidos para %s: ano_ref=%s, mes_ref=%s, TipoXml=%s, TipoFundo=%s", tabela, ano_ref, mes_ref, TipoXml, TipoFundo)
+
         try:
             ano_ref = int(ano_ref) if ano_ref else None
             mes_ref = int(mes_ref) if mes_ref else None
@@ -1900,29 +1974,28 @@ def gerar_xml_view(request, tabela):
             TipoFundo = int(TipoFundo) if TipoFundo else None
         except (ValueError, TypeError) as e:
             mensagem_erro = f"Erro ao converter parâmetros para inteiros: {str(e)}"
-            print(f'[DEBUG] ERRO: {mensagem_erro}')
+            logger.error(mensagem_erro, exc_info=True)
             messages.error(request, mensagem_erro)
             return redirect('menu')
-        
-        # Valida se todos os parâmetros foram fornecidos
+
         if not all([ano_ref, mes_ref, TipoXml, TipoFundo]):
             mensagem_erro = f"Parâmetros faltando - ano_ref: {ano_ref}, mes_ref: {mes_ref}, TipoXml: {TipoXml}, TipoFundo: {TipoFundo}"
-            print(f'[DEBUG] ERRO: {mensagem_erro}')
+            logger.warning(mensagem_erro)
             messages.error(request, mensagem_erro)
             return redirect('menu')
-        
+
         dados_fundo = obter_dados_fundo(ano_ref, mes_ref, TipoFundo)
-        print(f'[DEBUG] CHEGUEI 2 - Dados do fundo obtidos: {dados_fundo}')
-        
+        logger.debug("Dados do fundo obtidos para %s", tabela)
+
         tabelas = obter_tabelas_relacionadas(TipoXml)
-        print(f'[DEBUG] CHEGUEI 3 - Tabelas relacionadas: {tabelas}')
-        
+        logger.debug("Tabelas relacionadas identificadas para TipoXml %s: %s", TipoXml, len(tabelas))
+
         if not tabelas:
             messages.info(request, "Nenhuma tabela configurada para este TipoXml ou TipoXml não fornecido.")
             return redirect('menu')
 
         for nome_tabela, campo_filter, ordem in tabelas:
-            logger.info(f"Processando tabela: {nome_tabela}")
+            logger.info("Processando tabela %s", nome_tabela)
             result = _process_xml_generation(request, nome_tabela, campo_filter, dados_fundo, ano_ref, mes_ref, TipoFundo)
             resultado.append(result)
 
@@ -1972,8 +2045,11 @@ def _get_display_fields(menu_option, model):
     try:
         estruturas = RppsEstrutura.objects.filter(nome_tabela=menu_option).order_by('ordem_campo')
         display_fields = [estrutura.nome_campo for estrutura in estruturas if estrutura.nome_campo]
-        if display_fields:
-            return display_fields
+        # Remove campos virtuais (ex.: tipo_campo='disable') que existem apenas no metadado
+        # e não são colunas reais do modelo, evitando FieldError/AttributeError no ORM.
+        display_fields_validos = validate_model_field_names(model, display_fields)
+        if display_fields_validos:
+            return display_fields_validos
     except Exception as e:
         logger.error(f"--- DEBUG: Erro ao obter campos da estrutura: {e}")
 
@@ -1981,8 +2057,9 @@ def _get_display_fields(menu_option, model):
         estrutura = RppsEstrutura.objects.filter(nome_tabela=menu_option).first()
         if estrutura:
             display_fields = estrutura.get_campos_chave()
-            if display_fields:
-                return display_fields
+            display_fields_validos = validate_model_field_names(model, display_fields)
+            if display_fields_validos:
+                return display_fields_validos
     except Exception as e:
         logger.error(f"--- DEBUG: Erro ao obter campos alternativos: {e}")
 
@@ -2080,7 +2157,7 @@ def _apply_filters(request, queryset, model, menu_option, display_fields, estrut
         pass
 
     if filtros:
-        queryset = queryset.filter(**filtros)
+        queryset = queryset.filter(**safe_model_filter(model, filtros))
     return queryset
 
 @login_required
@@ -2098,7 +2175,12 @@ def modal_grid_view(request, menu_option):
         queryset = model.objects.all()
         queryset = _apply_filters(request, queryset, model, menu_option, display_fields, estruturas, campos_estrutura)
 
-        queryset = queryset.order_by('-id').values('id', *display_fields)
+        display_fields_validos = validate_model_field_names(model, display_fields)
+        if display_fields_validos:
+            queryset = queryset.order_by('-id').values('id', *display_fields_validos)
+        else:
+            logger.warning("modal_grid_view: nenhum display_field válido para %s; usando fallback 'id'", menu_option)
+            queryset = queryset.order_by('-id').values('id')
 
         # Log do SQL gerado para depuração
         try:
@@ -2179,6 +2261,7 @@ def modal_search_view(request, tabela):
         # Verifica se é pesquisa em tabela FK ou tabela principal
         is_fk_search = request.GET.get('fk_search', 'false') == 'true'
         parent_table = request.GET.get('parent_table', tabela)
+        fk_field_name = request.GET.get('fk_field_name', '').strip()
         
         # Busca o modelo
         model = MODEL_MAPPING.get(tabela)
@@ -2344,11 +2427,12 @@ def modal_search_view(request, tabela):
         sort_dir = request.GET.get('sort_dir', 'desc').strip()
         
         if sort_field and sort_field in display_fields:
-            # Aplica ordenação pelo campo solicitado
+            # Aplica ordenação pelo campo solicitado, validando o identificador antes da montagem
+            sort_field_validado = validate_column_name(tabela, sort_field)
             order_prefix = '-' if sort_dir == 'desc' else ''
             try:
-                queryset = queryset.order_by(f'{order_prefix}{sort_field}')
-            except:
+                queryset = queryset.order_by(f'{order_prefix}{sort_field_validado}')
+            except Exception:
                 # Fallback para ordenação pela PK
                 queryset = queryset.order_by(f'-{pk_field}')
         else:
@@ -2419,6 +2503,7 @@ def modal_search_view(request, tabela):
             'tabela': tabela,
             'table_name': table_name,
             'parent_table': parent_table,
+            'fk_field_name': fk_field_name,
             'is_fk_search': is_fk_search,
             'filter_configs': filter_configs,
             'active_filters': active_filters,

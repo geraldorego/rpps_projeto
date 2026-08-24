@@ -12,6 +12,7 @@ urlpatterns = [
     path('export/excel/<str:tabela>/', views.export_excel_view, name='export_excel'),
     path('export/pdf/<str:tabela>/', views.export_pdf_view, name='export_pdf'),
     path('api/related-fields/<str:tabela>/<str:campo_fk>/', views.get_related_fields_data, name='get_related_fields'),
+    path('RPPS/', views.rpps_list_view, name='rpps_list_view'),
     path('<str:tabela>/check-fk/<str:campo_fk>/', views.check_fk_field, name='check_fk_field'),
     path('<str:tabela>/', views.dynamic_form_view, name='dynamic_form'),
     path('<str:tabela>/check/', views.check_record, name='check_record'),

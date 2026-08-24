@@ -1,6 +1,6 @@
 from django.db import connection
 
-from .metadata_helpers import validate_table_name, validate_columns
+from .metadata_helpers import validate_table_name, validate_columns, validate_column_name
 
 
 def get_referencia_data(config, filtros=None):
@@ -18,14 +18,16 @@ def get_referencia_data(config, filtros=None):
         if filtros:
             where_clauses = []
             for k, v in filtros.items():
-                if v is not None:
-                    coluna = k.strip()
-                    if not coluna:
-                        continue
-                    validate_table_name(tabela)
-                    validate_columns(tabela, [coluna])
-                    where_clauses.append(f"{connection.ops.quote_name(coluna)} = %s")
-                    params.append(v)
+                if v is None:
+                    continue
+
+                coluna = str(k).strip()
+                if not coluna:
+                    continue
+
+                coluna_validada = validate_column_name(tabela, coluna)
+                where_clauses.append(f"{connection.ops.quote_name(coluna_validada)} = %s")
+                params.append(v)
 
             if where_clauses:
                 where = "WHERE " + " AND ".join(where_clauses)

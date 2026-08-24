@@ -154,6 +154,7 @@ if (!transferBtn) {
     const recordId = selectedCheckbox.value;
     const tabela = '{{ tabela }}';
     const parentTable = '{{ parent_table }}';
+    const fieldName = '{{ fk_field_name|default:"" }}';
     const isFkSearch = {% if is_fk_search %}true{% else %}false{% endif %};
     
     console.log('[TRANSFER] 📋 Iniciando transferência:', {
@@ -168,7 +169,7 @@ if (!transferBtn) {
     if (isFkSearch && parentTable && parentTable !== tabela) {
         console.log('[TRANSFER] ✅ Modo FK ATIVADO: Preenchendo campo no formulário', parentTable);
         
-        const checkUrl = `/${tabela}/check/?id=${recordId}&parent_table=${parentTable}`;
+        const checkUrl = `/${tabela}/check/?id=${recordId}&parent_table=${parentTable}${fieldName ? `&field_name=${encodeURIComponent(fieldName)}` : ''}`;
         
         fetch(checkUrl, {
             headers: { 'Accept': 'application/json' }
@@ -300,6 +301,7 @@ if (!transferBtn) {
             
             if (newForm && currentForm) {
                 currentForm.parentNode.replaceChild(document.importNode(newForm, true), currentForm);
+                if (window.htmx) htmx.process(document.getElementById('dynamic-form'));
                 
                 // Reinicializa JavaScript
                 if (window.RPPS) {

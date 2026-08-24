@@ -12,7 +12,7 @@ const DocumentoMask = {
      */
     formatarDocumento(valor) {
         valor = valor.replace(/\D/g, '');
-        
+
         // CPF: 000.000.000-00 (11 dígitos)
         if (valor.length <= 11) {
             if (valor.length > 9) {
@@ -24,7 +24,7 @@ const DocumentoMask = {
             }
             return valor;
         }
-        
+
         // CNPJ: 00.000.000/0000-00 (14 dígitos)
         if (valor.length <= 14) {
             if (valor.length > 12) {
@@ -38,7 +38,7 @@ const DocumentoMask = {
             }
             return valor;
         }
-        
+
         // Limita a 14 dígitos
         valor = valor.slice(0, 14);
         return valor.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, '$1.$2.$3/$4-$5');
@@ -51,27 +51,27 @@ const DocumentoMask = {
         document.querySelectorAll('input[data-mask-cpfcnpj="true"]').forEach(input => {
             // Guarda a posição do cursor
             let lastCursorPosition = 0;
-            
+
             input.addEventListener('input', function(e) {
                 // Salva posição do cursor
                 const cursorPos = this.selectionStart;
                 const valorAnterior = this.value;
-                
+
                 // Remove tudo que não é número
                 let valor = this.value.replace(/\D/g, '');
-                
+
                 // Limita a 14 dígitos
                 if (valor.length > 14) {
                     valor = valor.slice(0, 14);
                 }
-                
+
                 // Aplica formatação
                 const formatado = DocumentoMask.formatarDocumento(valor);
-                
+
                 // Atualiza o valor apenas se mudou
                 if (formatado !== this.value) {
                     this.value = formatado;
-                    
+
                     // Ajusta a posição do cursor
                     const diff = formatado.length - valorAnterior.length;
                     const newCursorPos = cursorPos + diff;
@@ -82,7 +82,7 @@ const DocumentoMask = {
             // Validação no blur
             input.addEventListener('blur', function() {
                 const valor = this.value.replace(/\D/g, '');
-                
+
                 // Se tiver valor mas não for 11 ou 14 dígitos, limpa
                 if (valor.length > 0 && valor.length !== 11 && valor.length !== 14) {
                     this.value = '';
@@ -142,10 +142,10 @@ const FormNavigation = {
         const focusableElements = 'input:not([type="hidden"]), select, textarea';
         const form = document.getElementById('dynamic-form');
         if (!form) return null;
-        
+
         const elements = Array.from(form.querySelectorAll(focusableElements))
             .filter(el => !el.disabled && !el.readOnly && getComputedStyle(el).display !== 'none');
-        
+
         const currentIndex = elements.indexOf(currentElement);
         return elements[currentIndex + 1] || null;
     },
@@ -156,16 +156,16 @@ const FormNavigation = {
     setInitialFocus() {
         const form = document.getElementById('dynamic-form');
         if (!form) return;
-        
+
         // Não focar automaticamente se a página foi recarregada por submissão
         if (performance.navigation && performance.navigation.type === 1) {
             return;
         }
-        
+
         // Não focar se vier de uma submissão POST
         const isFromSubmission = document.referrer && document.referrer === window.location.href;
         if (isFromSubmission) return;
-        
+
         // Encontra o primeiro input visível e editável
         const firstInput = form.querySelector('input:not([type="hidden"]):not([readonly]):not([disabled]), select:not([disabled]), textarea:not([readonly]):not([disabled])');
         if (firstInput) {
@@ -195,7 +195,7 @@ const FormNavigation = {
                 if (e.key === 'Enter' && this.tagName.toLowerCase() !== 'textarea') {
                     e.preventDefault();
                     e.stopPropagation();
-                    
+
                     // Verifica se está em campo de chave com botão de pesquisa
                     const inputGroup = this.closest('.input-group');
                     if (inputGroup && inputGroup.querySelector('button.btn-pesquisa')) {
@@ -206,7 +206,7 @@ const FormNavigation = {
                         }
                         return false;
                     }
-                    
+
                     // Move para o próximo campo
                     const nextElement = FormNavigation.getNextFocusableElement(this);
                     if (nextElement) {
@@ -215,7 +215,7 @@ const FormNavigation = {
                             nextElement.select();
                         }
                     }
-                    
+
                     return false;
                 }
             });
@@ -246,20 +246,20 @@ const FormValidation = {
 
         form.addEventListener('submit', function(e) {
             const submitButton = document.activeElement;
-            
+
             // Não valida se for botão de excluir
             if (submitButton && submitButton.value !== 'excluir') {
                 if (!this.checkValidity()) {
                     e.preventDefault();
                     e.stopPropagation();
-                    
+
                     const firstInvalidField = this.querySelector(':invalid');
                     if (firstInvalidField) {
                         firstInvalidField.focus();
                     }
                 }
             }
-            
+
             this.classList.add('was-validated');
         });
     }
@@ -275,9 +275,9 @@ const ModalManager = {
     init() {
         // Handler para HTMX afterSwap
         document.body.addEventListener('htmx:afterSwap', function(evt) {
-            const target = evt.detail?.target;
-            console.log('[MODAL] HTMX afterSwap - Target:', target?.id, 'Classes:', target?.className);
-            
+            const target = evt.detail ? .target;
+            console.log('[MODAL] HTMX afterSwap - Target:', target ? .id, 'Classes:', target ? .className);
+
             if (!target) {
                 console.log('[MODAL] Sem target, abortando');
                 return;
@@ -285,7 +285,7 @@ const ModalManager = {
 
             if (target.id === 'modal' || target.classList.contains('modal')) {
                 console.log('[MODAL] Target é modal, verificando conteúdo...');
-                
+
                 if (!target.innerHTML || target.innerHTML.trim() === '') {
                     console.log('[MODAL] Modal vazio, abortando');
                     return;
@@ -293,9 +293,9 @@ const ModalManager = {
 
                 console.log('[MODAL] Tentando abrir modal...');
                 let modalInst = null;
-                if (bootstrap?.Modal?.getOrCreateInstance) {
+                if (bootstrap ? .Modal ? .getOrCreateInstance) {
                     modalInst = bootstrap.Modal.getOrCreateInstance(target);
-                } else if (bootstrap?.Modal?.getInstance) {
+                } else if (bootstrap ? .Modal ? .getInstance) {
                     modalInst = bootstrap.Modal.getInstance(target) || new bootstrap.Modal(target);
                 }
 
@@ -361,12 +361,12 @@ const ReportManager = {
             if (!form) return;
 
             const actionUrl = form.getAttribute('action');
-            const tabelaMatch = actionUrl?.match(/tratamento\/([^\/]+)/);
+            const tabelaMatch = actionUrl ? .match(/tratamento\/([^\/]+)/);
             if (!tabelaMatch) return;
 
             const tabela = tabelaMatch[1];
             const queryParams = new URLSearchParams();
-            
+
             Array.from(form.elements).forEach(element => {
                 if (element.name && element.value) {
                     queryParams.append(element.name, element.value);
@@ -383,7 +383,7 @@ const ReportManager = {
             if (pdfBtn) pdfBtn.href = pdfUrl;
 
             modalBody.innerHTML = '<div class="text-center"><div class="spinner-border" role="status"><span class="visually-hidden">Carregando...</span></div></div>';
-            
+
             fetch(reportUrl)
                 .then(response => response.text())
                 .then(html => {
@@ -473,11 +473,11 @@ const BlurManager = {
                 console.log(`[PK_BLUR] Disparando blur-check: ${this.name} -> ${fullUrl}`);
 
                 fetch(fullUrl, {
-                    headers: {
-                        'HX-Request': 'true',
-                        'Accept': 'text/html'
-                    }
-                })
+                        headers: {
+                            'HX-Request': 'true',
+                            'Accept': 'text/html'
+                        }
+                    })
                     .then(response => response.text())
                     .then(html => {
                         const parser = new DOMParser();
@@ -487,6 +487,7 @@ const BlurManager = {
                             const currentForm = document.getElementById('dynamic-form');
                             if (currentForm) {
                                 currentForm.replaceWith(newForm);
+                                if (window.htmx) htmx.process(newForm);
                             }
                             console.log(`[PK_BLUR] Form atualizdo via chave composta em "${this.name}"`);
                         }

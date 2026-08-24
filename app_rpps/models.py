@@ -28,6 +28,12 @@ class RppsEstrutura(models.Model):
     decimais = models.IntegerField(verbose_name="Casas Decimais", null=True, blank=True, default=0)
     obrigatorio = models.BooleanField(default=False, verbose_name="Obrigatório?")
     tabela_referencia = models.TextField(blank=True, null=True, verbose_name="Configuração de Referência")
+    referencia_config = models.TextField(
+                            blank=True,
+                            null=True,
+                            verbose_name="Configuração estruturada de referência",
+                            help_text="Estrutura formal para tabela, campo de referência, filtros e dependências (armazenado como JSON)"
+                            )
     label_campo = models.CharField(max_length=55, verbose_name="Rótulo do Campo")
     prenc_zeros = models.BooleanField(default=False, verbose_name="Preencher com Zeros?")
     entrada_espec = models.CharField(max_length=500, null=True, blank=True, verbose_name="Opções para Select")
@@ -71,17 +77,25 @@ class RppsEstrutura(models.Model):
     campo_xml = models.BooleanField(default=False, verbose_name="campo para XML")
 
     class Meta:
+        managed = True
         db_table = 'RppsEstrutura'
         verbose_name = 'Estrutura RPPS'
         verbose_name_plural = 'Estruturas RPPS'
         ordering = ['nome_tabela', 'ordem_campo']
 
     def get_referencia_config(self):
-        """Retorna a configuração de referência como dicionário"""
-        try:
-            return json.loads(self.tabela_referencia) if self.tabela_referencia else {}
-        except json.JSONDecodeError:
-            return {}
+        """Retorna a configuração de referência em formato estruturado.
+
+        Prioriza o campo novo `referencia_config`, mas mantém compatibilidade com
+        os valores legados armazenados em `tabela_referencia`.
+        """
+        from .metadata_helpers import get_referencia_config
+
+        config = get_referencia_config(self)
+        if config and (config.get('tabela') or config.get('campo_tabela') or config.get('campo_tela')):
+            if not self.referencia_config:
+                self.referencia_config = json.dumps(config)
+        return config
 
     def get_campos_chave(self):
         """Retorna lista de campos chave"""
@@ -125,6 +139,32 @@ class RppsEstrutura(models.Model):
     def __str__(self):
         return f"{self.nome_tabela}.{self.nome_campo} ({self.tabela_referencia} - {self.campo_chave_blur } )"
 
+
+def migrar_tabela_referencia_para_json():
+    """Converte valores legados em tabela_referencia para a estrutura formal em referencia_config.
+
+    Mantém compatibilidade com o DSL atual do projeto, sem exigir migrations no schema legado.
+    """
+    from .metadata_helpers import parse_referencia_config
+
+    atualizados = 0
+    for estrutura in RppsEstrutura.objects.all():
+        if not estrutura.tabela_referencia:
+            continue
+
+        config = parse_referencia_config(estrutura.tabela_referencia)
+        if not config.get('tabela') and not config.get('campo_tabela') and not config.get('campo_tela'):
+            continue
+
+        config_json = json.dumps(config)
+        if estrutura.referencia_config != config_json:
+            estrutura.referencia_config = config_json
+            estrutura.save(update_fields=['referencia_config'])
+            atualizados += 1
+
+    return atualizados
+
+
 class EstruturaMenu(models.Model):
     TIPO_ACAO_CHOICES = [
         ('CRUD', 'Formulário CRUD'),
@@ -145,6 +185,7 @@ class EstruturaMenu(models.Model):
     icone = models.CharField(max_length=50, blank=True, null=True, verbose_name="Ícone (Bootstrap Icons)")
     
     class Meta:
+        managed = False
         db_table = 'EstruturaMenu'
         verbose_name = 'Item de Menu'
         verbose_name_plural = 'Itens de Menu'
@@ -159,6 +200,7 @@ class Cadastro(models.Model):
     Cargo   = models.CharField(max_length=255)
 
     class Meta:
+        managed = False
         db_table = 'Cadastro'
         unique_together = [('CpfCnpj')] 
         verbose_name = 'Cadastro'
@@ -202,6 +244,7 @@ class RPPS(models.Model):
     TipoMassa = models.IntegerField()
 
     class Meta:
+        managed = False
         db_table = 'RPPS'
         unique_together = [('ano_ref', 'mes_ref', 'TipoFundo', 'CNPJEnteFederativo', 'CNPJRPPS')]
         verbose_name = 'RPPS'
@@ -242,6 +285,7 @@ class CertificacaoRPPS(models.Model):
     )
 
     class Meta:
+        managed = False
         db_table = 'CertificacaoRPPS'
         unique_together = [('ano_ref', 'mes_ref', 'TipoFundo','CNPJEnteFederativo')]  
         verbose_name = 'CertificacaoRPPS'
@@ -274,6 +318,7 @@ class CertificadoRegularidadePrevidenciaria(models.Model):
     Tipo = models.IntegerField()
 
     class Meta:
+        managed = False
         db_table = 'CertificadoRegularidadePrevidenciaria'
         unique_together = [('ano_ref', 'mes_ref', 'TipoFundo','CNPJEnte')]  
         verbose_name = 'Certificado Regularidade Previdenciaria'
@@ -299,6 +344,7 @@ class GruposColegiados(models.Model):
     QuantidadeMembros = models.IntegerField()
 
     class Meta:
+        managed = False
         db_table = 'GruposColegiados'  # Substitua pelo nome real da tabela
         unique_together = [('ano_ref', 'mes_ref', 'TipoFundo','Codigo')]  
         verbose_name = 'Grupos Colegiados'
@@ -332,6 +378,7 @@ class MembroColegio(models.Model):
     DataValidadeCertificado = models.CharField(max_length=10,null=True)
 
     class Meta:
+        managed = False
         db_table = 'MembroColegio'
         unique_together = [('ano_ref', 'mes_ref', 'TipoFundo','CodigoGrupoColegiado','CPF')]
         verbose_name = 'MembroColegio'
@@ -363,6 +410,7 @@ class PlanoCusteio(models.Model):
     AliquotaPatronalExtraordinária = models.DecimalField(max_digits=18, decimal_places=2)
 
     class Meta:
+        managed = False
         db_table = 'PlanoCusteio'  # Substitua pelo nome real da tabela
         unique_together = [('ano_ref', 'mes_ref', 'TipoFundo','TipoMassa')]  # Substituído por unique_together0
         verbose_name = 'Plano Custeio'
@@ -392,6 +440,7 @@ class ResultadoAtuarial(models.Model):
     NumeroIBA = models.IntegerField()
 
     class Meta:
+        managed = False
         db_table = 'ResultadoAtuarial'
         unique_together = [('ano_ref', 'mes_ref','TpFundo','TipoFundo')]
         verbose_name = 'Resultado Atuarial'
@@ -422,6 +471,7 @@ class CompensacaoPrevidenciaria(models.Model):
     SaldoFluxo = models.DecimalField(max_digits=18, decimal_places=2)  # Saldo fluxo
 
     class Meta:
+        managed = False
         db_table = "CompensacaoPrevidenciaria"
         constraints = [
             models.UniqueConstraint(
@@ -460,6 +510,7 @@ class Parcelamento(models.Model):
     IndexadorMonetario = models.PositiveSmallIntegerField(blank=True, null=True)
      
     class Meta:
+        managed = False
         db_table = 'Parcelamento'
         unique_together = [('ano_ref', 'mes_ref','TipoFundo','CNPJOrgaoParcelamento')]
         verbose_name = 'Parcelamento'
@@ -491,6 +542,7 @@ class ParcelasParcelamento(models.Model):
 
      
     class Meta:
+        managed = False
         db_table = 'ParcelasParcelamento'
         unique_together = [('TipoFundo', 'CNPJOrgaoParcelamento')]
         verbose_name = 'Parcelamento'
@@ -510,6 +562,7 @@ class PoliticaInvestimento(models.Model):
     AlocacaoRPPS = models.PositiveSmallIntegerField()
 
     class Meta:
+        managed = False
         db_table = 'PoliticaInvestimento'
         unique_together = [('TipoFundo', 'Ano', 'Segmento')]  # Substituído por unique_together
         verbose_name = 'Politica Investimento'
@@ -541,6 +594,7 @@ class CarteiraInvestimento(models.Model):
     PatrimonioLiquidoAtivo = models.DecimalField(max_digits=28, decimal_places=8)
 
     class Meta:
+        managed = False
         db_table = 'CarteiraInvestimento'
         unique_together = [('TipoFundo','Ano', 'Mes','CNPJAtivo','Seguimento','Enquadramento' )]  
         verbose_name = 'Carteira Investimento'
@@ -563,6 +617,7 @@ class AcompanhamentoMetaAtuarial(models.Model):
     MetaAtuarial = models.DecimalField(max_digits=18, decimal_places=2)
 
     class Meta:
+        managed = False
         db_table = 'AcompanhamentoMetaAtuarial'
         unique_together = [('TipoFundo','Ano', 'Mes')]  # Substituído por unique_together
         verbose_name = 'Acompanhamento Meta Atuarial'
@@ -594,6 +649,7 @@ class GestorFinanceiro(models.Model):
     DataValidade = models.CharField(max_length=10)
 
     class Meta:
+        managed = False
         db_table = 'GestorFinanceiro'
         unique_together = [('ano_ref', 'mes_ref', 'TipoFundo','CPF', 'Certificacao')]
         verbose_name = 'Gestor Financeiro'
@@ -610,6 +666,7 @@ class TBveipub(models.Model):
     descricao = models.CharField(max_length=54)
 
     class Meta:   
+        managed = False
         db_table = 'TBveipub'
         verbose_name = 'Veiculo Publico'
         verbose_name_plural = 'Veiculos Publico'   
@@ -626,6 +683,7 @@ class Fundo(models.Model):
     ug = models.IntegerField()
     
     class Meta:
+        managed = False
         db_table = 'Fundo'  # Substitua pelo nome real da tabela
         unique_together = [('TipoFundo','ano_ref', 'mes_ref')]
         verbose_name = 'Fundo'
@@ -647,6 +705,7 @@ class TipoXml(models.Model):
     ordem_xml = models.PositiveSmallIntegerField()
   
     class Meta:
+        managed = False
         db_table = 'TipoXml'  
         unique_together = [('TipoXml','ano_ref', 'mes_ref','Nomarq')]
         verbose_name = 'Tipo do movimento para o Xml'
@@ -663,6 +722,7 @@ class Gerxml(models.Model):
     TipoFundo = models.IntegerField()
 
     class Meta:
+        managed = False
         db_table = 'Gerxml'  # Substitua pelo nome real da tabela
         unique_together = [('ano_ref', 'mes_ref', 'TipoXml','TipoFundo')]
         verbose_name = 'Gerxml'

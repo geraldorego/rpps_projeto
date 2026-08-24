@@ -107,7 +107,7 @@
                                     {# Botão para pesquisar na tabela de referência (FK) #}
                                     <button class="btn btn-outline-secondary btn-pesquisa" 
                                             type="button"
-                                            hx-get="{% url 'modal_search' tabela=fk_modal_tables|get_item:field.name %}?fk_search=true&parent_table={{ tabela }}"
+                                            hx-get="{% url 'modal_search' tabela=fk_modal_tables|get_item:field.name %}?fk_search=true&parent_table={{ tabela }}&fk_field_name={{ field.name }}"
                                             hx-target="#modal"
                                             hx-swap="innerHTML"
                                             hx-push-url="false"
@@ -171,8 +171,6 @@
     {% endif %}
 </div>
 
-<!-- Script para campos relacionados FK -->
-<script src="{% static 'js/fk_related_fields.js' %}"></script>
 <script>
     // Configura contexto para campos FK com mapeamento
     {% if fk_field_mappings %}
@@ -264,11 +262,15 @@
                 if (!baseUrl || !form) return;
 
                 const params = new URLSearchParams();
-                appendDynamicFkFilters(form, params, fieldElement);
+                if (form) {
+                    appendDynamicFkFilters(form, params, fieldElement);
+                }
 
                 const separator = baseUrl.includes('?') ? '&' : '?';
                 const fullUrl = params.toString() ? `${baseUrl}${separator}${params.toString()}` : baseUrl;
                 this.setAttribute('hx-get', fullUrl);
+                this.setAttribute('hx-target', '#modal');
+                this.setAttribute('hx-swap', 'innerHTML');
 
                 setTimeout(() => {
                     this.setAttribute('hx-get', baseUrl);

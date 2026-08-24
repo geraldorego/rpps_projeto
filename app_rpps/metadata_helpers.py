@@ -6,6 +6,8 @@ permitindo retrocompatibilidade com valores históricos enquanto normaliza
 para um padrão canônico.
 """
 
+import ast
+import json
 import logging
 import re
 
@@ -134,6 +136,209 @@ def validate_columns(table_name, columns):
     return validas
 
 
+def validate_model_field_name(model, field_name, allow_relation=False):
+    """Valida um nome de campo do ORM e rejeita lookup traversal / campos proibidos."""
+    if model is None:
+        logger.warning("validate_model_field_name: model ausente.")
+        return None
+
+    if field_name is None:
+        logger.warning("validate_model_field_name: field_name ausente para %s.", model.__name__)
+        return None
+
+    valor = str(field_name).strip()
+    if not valor:
+        logger.warning("validate_model_field_name: field_name vazio para %s.", model.__name__)
+        return None
+
+    if valor in {'__', '.', '..'} or '__' in valor or '.' in valor:
+        logger.warning("validate_model_field_name: lookup traversal rejeitado para %s: %r", model.__name__, field_name)
+        return None
+
+    if not _SQL_IDENTIFIER_RE.fullmatch(valor):
+        logger.warning("validate_model_field_name: identificador inválido para %s: %r", model.__name__, field_name)
+        return None
+
+    try:
+        meta_field = model._meta.get_field(valor)
+    except Exception:
+        logger.warning("validate_model_field_name: campo não encontrado em %s: %r", model.__name__, field_name)
+        return None
+
+    if not allow_relation:
+        if hasattr(meta_field, 'many_to_many') and meta_field.many_to_many:
+            logger.warning("validate_model_field_name: campo de relacionamento rejeitado em %s: %r", model.__name__, field_name)
+            return None
+        if hasattr(meta_field, 'many_to_one') and meta_field.many_to_one:
+            logger.warning("validate_model_field_name: ForeignKey rejeitado em %s: %r", model.__name__, field_name)
+            return None
+        if hasattr(meta_field, 'one_to_many') and meta_field.one_to_many:
+            logger.warning("validate_model_field_name: relacionamento rejeitado em %s: %r", model.__name__, field_name)
+            return None
+
+    return valor
+
+
+def validate_model_field_names(model, field_names, allow_relation=False):
+    """Valida uma lista de nomes de campo do ORM e retorna somente campos seguros."""
+    if model is None:
+        return []
+    if not field_names:
+        return []
+
+    validas = []
+    for item in field_names:
+        valido = validate_model_field_name(model, item, allow_relation=allow_relation)
+        if valido:
+            validas.append(valido)
+    return validas
+
+
+def resolve_model_target(app_label, model_name):
+    """Resolve um modelo do app_rpps usando regras restritas sem whitelist fixa de negócios."""
+    if app_label is None or str(app_label).strip() != 'app_rpps':
+        logger.warning("resolve_model_target: app_label inválido: %r", app_label)
+        return None
+
+    if model_name is None:
+        logger.warning("resolve_model_target: model_name ausente para app_label %r", app_label)
+        return None
+
+    valor = str(model_name).strip()
+    if not valor:
+        logger.warning("resolve_model_target: model_name vazio para app_label %r", app_label)
+        return None
+
+    if not _SQL_IDENTIFIER_RE.fullmatch(valor):
+        logger.warning("resolve_model_target: model_name inválido para %r: %r", app_label, model_name)
+        return None
+
+    try:
+        model = apps.get_model(app_label=app_label, model_name=valor)
+    except Exception:
+        logger.warning("resolve_model_target: modelo não encontrado para %s.%s", app_label, valor)
+        return None
+
+    if model is None:
+        logger.warning("resolve_model_target: modelo ausente para %s.%s", app_label, valor)
+        return None
+
+    return model
+
+
+def safe_model_filter(model, filters):
+    """Filtra um dicionário de filtros, removendo chaves inválidas e potencialmente perigosas."""
+    if model is None or not isinstance(filters, dict):
+        return {}
+
+    seguros = {}
+    for chave, valor in filters.items():
+        campo_valido = validate_model_field_name(model, chave)
+        if campo_valido is None:
+            logger.warning("safe_model_filter: campo rejeitado para %s: %r", model.__name__, chave)
+            continue
+        seguros[campo_valido] = valor
+    return seguros
+
+
+def validate_order_by(table_name, order_by):
+    """Valida e normaliza uma cláusula ORDER BY controlada por metadados.
+
+    Aceita entradas como:
+      - 'ano_ref'
+      - '-mes_ref'
+      - 'ano_ref DESC'
+      - 'ano_ref DESC, mes_ref ASC'
+
+    Retorna uma cláusula SQL segura com identificadores citados e direção validada.
+    """
+    tabela = validate_table_name(table_name)
+    if order_by is None:
+        return ''
+
+    valor = str(order_by).strip()
+    if not valor:
+        return ''
+
+    partes = [parte.strip() for parte in valor.split(',') if parte.strip()]
+    if not partes:
+        return ''
+
+    clausulas = []
+    for parte in partes:
+        match = re.match(r'^(?P<prefix>[+-])?(?P<campo>[A-Za-z_][A-Za-z0-9_]*)(?:\s+(?P<direcao>ASC|DESC))?$', parte, re.IGNORECASE)
+        if not match:
+            raise ValueError(f"ORDER BY inválido para tabela {tabela!r}: {order_by!r}")
+
+        campo = validate_column_name(tabela, match.group('campo'))
+        direcao = (match.group('direcao') or '').upper()
+        prefix = match.group('prefix') or ''
+
+        if prefix == '-':
+            direcao = 'DESC'
+        elif prefix == '+':
+            direcao = 'ASC'
+
+        item = connection.ops.quote_name(campo)
+        if direcao:
+            item = f"{item} {direcao}"
+        clausulas.append(item)
+
+    return ', '.join(clausulas)
+
+
+def parse_referencia_config(tabela_referencia):
+    """Converte o DSL legado em uma estrutura canônica e formal.
+
+    Retorna um dict com:
+      - tabela: nome do modelo alvo
+      - campo_tabela: campo da tabela referenciada
+      - campo_tela: campo exibido na tela
+      - filtros: dicionário de mapeamento para filtros opcionais
+      - dependencias: lista de campos de dependência
+    """
+    if tabela_referencia is None:
+        return {'tabela': None, 'campo_tabela': None, 'campo_tela': None, 'filtros': {}, 'dependencias': []}
+
+    tabela_ref_limpa = str(tabela_referencia).strip()
+    if not tabela_ref_limpa:
+        return {'tabela': None, 'campo_tabela': None, 'campo_tela': None, 'filtros': {}, 'dependencias': []}
+
+    nome_tabela, campo_tabela, campo_tela = parse_tabela_referencia(tabela_ref_limpa)
+    config = {
+        'tabela': nome_tabela,
+        'campo_tabela': campo_tabela,
+        'campo_tela': campo_tela,
+        'filtros': {},
+        'dependencias': [],
+    }
+
+    if not campo_tela:
+        return config
+
+    filtros = {}
+    dependencias = []
+    for parte in str(campo_tela).split(','):
+        item = parte.strip()
+        if not item:
+            continue
+
+        if '=' in item:
+            campo_ref, campo_local = [valor.strip() for valor in item.split('=', 1)]
+            if campo_ref and campo_local:
+                filtros[campo_ref] = campo_local
+                dependencias.append(campo_ref)
+        else:
+            dependencias.append(item)
+
+    if filtros:
+        config['filtros'] = filtros
+    if dependencias:
+        config['dependencias'] = dependencias
+
+    return config
+
+
 def parse_tabela_referencia(tabela_referencia):
     """
     Extrai nome da tabela, campo da tabela e campo da tela do formato de tabela_referencia.
@@ -188,6 +393,40 @@ def parse_tabela_referencia(tabela_referencia):
             return (None, None, None)
 
     return (tabela_ref_limpa, None, None)
+
+
+def get_referencia_config(estrutura):
+    """Retorna a configuração de referência em formato estruturado.
+
+    Prioriza `referencia_config` quando disponível e usa o parser legado como fallback.
+    """
+    if estrutura is None:
+        return {'tabela': None, 'campo_tabela': None, 'campo_tela': None, 'filtros': {}, 'dependencias': []}
+
+    referencia_config = getattr(estrutura, 'referencia_config', None)
+    if referencia_config:
+        # O campo é armazenado como TextField; pode conter JSON serializado
+        # ou, por gravações legadas, o repr de um dict Python (aspas simples).
+        if isinstance(referencia_config, dict):
+            return referencia_config
+        if isinstance(referencia_config, str):
+            try:
+                config = json.loads(referencia_config)
+                if isinstance(config, dict):
+                    return config
+            except (ValueError, TypeError):
+                try:
+                    config = ast.literal_eval(referencia_config)
+                    if isinstance(config, dict):
+                        return config
+                except (ValueError, SyntaxError):
+                    logger.warning("get_referencia_config: valor inválido em referencia_config: %r", referencia_config)
+
+    tabela_referencia = getattr(estrutura, 'tabela_referencia', None)
+    if tabela_referencia:
+        return parse_referencia_config(tabela_referencia)
+
+    return {'tabela': None, 'campo_tabela': None, 'campo_tela': None, 'filtros': {}, 'dependencias': []}
 
 
 def normalize_reference_name(value):

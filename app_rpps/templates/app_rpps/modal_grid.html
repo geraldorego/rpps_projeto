@@ -116,6 +116,7 @@ document.getElementById('transfer-button').addEventListener('click', function() 
             if (newForm && currentForm) {
                 console.log('[TRANSFER] Substituindo formulário...');
                 currentForm.parentNode.replaceChild(newForm, currentForm);
+                if (window.htmx) htmx.process(newForm);
                 
                 // Dispara evento para notificar a troca
                 document.body.dispatchEvent(new CustomEvent('formAtualizado', {

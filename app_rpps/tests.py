@@ -1,10 +1,12 @@
-from django.test import TestCase
+from django.test import TestCase, RequestFactory
 from .metadata_helpers import (
     normalize_chave_tipo,
     is_primary_key_field,
     is_foreign_key_field,
     is_composite_foreign_key_field,
+    safe_model_filter,
 )
+from .models import RPPS
 
 
 class TestNormalizeChaveTipo(TestCase):
@@ -189,10 +191,13 @@ class TestIsCompositeForeignKeyField(TestCase):
 
 
 from .metadata_helpers import (
+    get_referencia_config,
+    parse_referencia_config,
     parse_tabela_referencia,
     validate_table_name,
     validate_column_name,
     validate_columns,
+    validate_order_by,
 )
 from .forms import DynamicFormGenerator
 from .models import GruposColegiados, RppsEstrutura
@@ -228,6 +233,65 @@ class TestSqlIdentifierValidation(TestCase):
 
     def test_validate_columns_accepts_allowed_values(self):
         self.assertEqual(validate_columns('ResultadoAtuarial', ['ano_ref', 'mes_ref']), ['ano_ref', 'mes_ref'])
+
+    def test_validate_order_by_accepts_allowed_metadata_fields(self):
+        self.assertEqual(validate_order_by('ResultadoAtuarial', 'ano_ref DESC'), '[ano_ref] DESC')
+        self.assertEqual(validate_order_by('ResultadoAtuarial', '-mes_ref'), '[mes_ref] DESC')
+
+    def test_validate_order_by_rejects_payloads_with_sql_fragments(self):
+        for value in [
+            'ano_ref; DROP TABLE ResultadoAtuarial',
+            'ano_ref DESC, nome_tabela--',
+            'ano_ref OR 1=1',
+        ]:
+            with self.assertRaises(ValueError):
+                validate_order_by('ResultadoAtuarial', value)
+
+
+class TestDynamicIdentifierSanitization(TestCase):
+    """Testes de regressão para filtros ORM e lookup de metadados perigosos."""
+
+    def test_safe_model_filter_rejects_invalid_keys(self):
+        filtros = {'ano_ref': 2024, 'bad__field': 'x', 'id': 1}
+        self.assertEqual(safe_model_filter(RPPS, filtros), {'ano_ref': 2024, 'id': 1})
+
+    def test_filter_foreignkey_options_rejects_invalid_campo_display(self):
+        factory = RequestFactory()
+        request = factory.get('/fk/', {'search': 'teste', 'campo_display': '__evil__'})
+
+        from .views import filter_foreignkey_options
+
+        response = filter_foreignkey_options(request, 'RPPS')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['results'], [])
+
+
+class TestReferenciaConfig(TestCase):
+    """Testes para a estrutura formal de referencia_config."""
+
+    def test_parse_referencia_config_legacy_dsl(self):
+        config = parse_referencia_config('Cadastro(CpfCnpj=CPF)')
+        self.assertEqual(config['tabela'], 'Cadastro')
+        self.assertEqual(config['campo_tabela'], 'CpfCnpj')
+        self.assertEqual(config['campo_tela'], 'CPF')
+        self.assertEqual(config['filtros'], {})
+
+    def test_parse_referencia_config_composta(self):
+        config = parse_referencia_config('GruposColegiados(ano_ref=ano_ref,mes_ref=mes_ref,TipoFundo=TipoFundo)')
+        self.assertEqual(config['tabela'], 'GruposColegiados')
+        self.assertEqual(config['campo_tabela'], 'ano_ref')
+        self.assertEqual(config['filtros']['mes_ref'], 'mes_ref')
+        self.assertEqual(config['filtros']['TipoFundo'], 'TipoFundo')
+
+    def test_get_referencia_config_prefers_structured_value(self):
+        estrutura = type('EstruturaFake', (), {
+            'tabela_referencia': 'Cadastro(CpfCnpj=CPF)',
+            'referencia_config': {'tabela': 'Cadastro', 'campo_tabela': 'CpfCnpj', 'campo_tela': 'CPF', 'filtros': {}, 'dependencias': []}
+        })()
+
+        config = get_referencia_config(estrutura)
+        self.assertEqual(config['tabela'], 'Cadastro')
+        self.assertEqual(config['campo_tela'], 'CPF')
 
 
 class TestParseTabelaReferencia(TestCase):
