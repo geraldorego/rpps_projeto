@@ -29,7 +29,7 @@
                             <button id="grid-filter-btn" class="btn btn-primary btn-sm w-100" title="Buscar registros">
                                 <i class="bi bi-search"></i> Buscar
                             </button>
-                            <button type="button" class="btn btn-success btn-sm w-100 mt-1" id="btn-novo-registro" data-tabela="{{ tabela }}">
+                            <button type="button" class="btn btn-success btn-sm w-100 mt-1" id="btn-novo-registro" data-tabela="{{ tabela }}" data-parent-table="{{ parent_table }}" data-fk-field-name="{{ fk_field_name }}" data-is-fk-search="{{ is_fk_search|yesno:'true,false' }}">
                                 <i class="bi bi-plus-lg"></i> Novo
                             </button>
                         </div>
@@ -260,6 +260,10 @@ if (!transferBtn) {
                     console.log(`[TRANSFER] ✅ Campo ${fieldName} preenchido:`, value);
                     camposPreenchidos++;
                 });
+                if (data.display && data.reference_field) {
+                    const display = parentForm.querySelector('[data-fk-display-for="' + data.reference_field + '"]');
+                    if (display) display.textContent = data.display;
+                }
                 console.log(`[TRANSFER] Total de campos preenchidos: ${camposPreenchidos}/${Object.keys(data.record).length}`);
                 
                 if (camposPreenchidos === 0) {

@@ -53,12 +53,29 @@ from .metadata_helpers import (
     validate_order_by,
     validate_model_field_name,
     validate_model_field_names,
+    resolve_model_target,
     safe_model_filter,
 )
 from .services import (
     get_referencia_options,
     safe_filter,
     exportar_excel,
+)
+from .services.referencia_service import (
+    find_reference_record,
+    get_reference_options,
+    normalize_reference_key,
+    parse_reference,
+    resolve_reference_display,
+    resolve_reference_model,
+    validate_reference_config,
+)
+from .services.copy_service import (
+    copy_period_records,
+    get_period_field_names,
+    parse_copy_action_parameters,
+    preview_period_copy,
+    validate_period_fields_metadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -599,6 +616,58 @@ def filter_foreignkey_options(request, tabela_ref):
 
 
 @login_required
+@require_http_methods(["GET"])
+def reference_options(request, tabela, campo_fk):
+    """Carrega opções de uma referência dinâmica com as dependências atuais do formulário."""
+    estrutura = RppsEstrutura.objects.filter(
+        nome_tabela=tabela,
+        nome_campo=campo_fk,
+    ).first()
+    if not estrutura or not estrutura.tabela_referencia:
+        return JsonResponse({'error': 'Campo de referência não configurado'}, status=404)
+
+    try:
+        config = parse_reference(estrutura)
+        model_ref = resolve_reference_model(config)
+        config = validate_reference_config(config, model_ref=model_ref)
+        model_local = MODEL_MAPPING.get(tabela) or resolve_model_target('app_rpps', tabela)
+        if model_local is None:
+            return JsonResponse({'error': 'Modelo principal não encontrado'}, status=404)
+
+        dependencias = {}
+        faltantes = []
+        for campo_ref, campo_local in config['filtros'].items():
+            campo_local_validado = validate_model_field_name(model_local, campo_local)
+            if campo_local_validado is None:
+                raise ValueError(f'Campo local de dependência inválido: {campo_local!r}.')
+            valor = request.GET.get(campo_local_validado, '').strip()
+            if valor == '':
+                faltantes.append(campo_local_validado)
+            else:
+                dependencias[campo_local_validado] = valor
+
+        if faltantes:
+            return JsonResponse({'ready': False, 'missing': faltantes, 'results': []})
+
+        opcoes = get_reference_options(config, filtros=dependencias)
+        return JsonResponse({
+            'ready': True,
+            'missing': [],
+            'results': [
+                {'value': str(value), 'text': str(display) if display is not None else str(value)}
+                for value, display in opcoes
+                if value is not None
+            ],
+        })
+    except ValueError as exc:
+        logger.warning("Configuração inválida ao carregar opções de %s.%s: %s", tabela, campo_fk, exc)
+        return JsonResponse({'error': 'Configuração de referência inválida'}, status=400)
+    except Exception as exc:
+        logger.exception("Erro ao carregar opções de %s.%s", tabela, campo_fk)
+        return JsonResponse({'error': 'Não foi possível carregar as opções'}, status=500)
+
+
+@login_required
 def get_related_fields_data(request, tabela, campo_fk):
     """
     Endpoint AJAX para buscar dados de campos relacionados via FK.
@@ -617,7 +686,7 @@ def get_related_fields_data(request, tabela, campo_fk):
     try:
         fk_id = request.GET.get('fk_id')
         if not fk_id:
-            return JsonResponse({'error': 'ID da FK não fornecido'}, status=400)
+            return JsonResponse({'error': 'Chave da referência não fornecida'}, status=400)
         
         # Busca configuração do campo FK
         campo_estrutura = RppsEstrutura.objects.filter(
@@ -633,59 +702,42 @@ def get_related_fields_data(request, tabela, campo_fk):
         if not tabela_referencia:
             return JsonResponse({'error': 'Tabela de referência não configurada'}, status=400)
         
-        config = get_referencia_config(campo_estrutura)
-        nome_tabela_ref = config.get('tabela') or parse_tabela_referencia(tabela_referencia)[0]
-        campo_tabela = config.get('campo_tabela') or parse_tabela_referencia(tabela_referencia)[1]
-        campo_tela = config.get('campo_tela') or parse_tabela_referencia(tabela_referencia)[2]
-
-        if not nome_tabela_ref:
-            return JsonResponse({'error': f'Formato inválido de tabela_referencia: {tabela_referencia}'}, status=400)
-        
-        model_ref = MODEL_MAPPING.get(nome_tabela_ref)
-        if not model_ref:
-            return JsonResponse({'error': f'Modelo {nome_tabela_ref} não encontrado'}, status=404)
-        
-        # Busca o registro na tabela de referência
-        try:
-            registro_ref = model_ref.objects.get(id=fk_id)
-        except model_ref.DoesNotExist:
+        reference = parse_reference(campo_estrutura)
+        reference['modelo'] = resolve_reference_model(reference)
+        reference = validate_reference_config(reference, model_ref=reference['modelo'])
+        if campo_estrutura.tipo_campo.lower() == 'varchar5':
+            fk_id = normalize_reference_key(fk_id, document=True)
+        _, registro_ref = find_reference_record(reference, fk_id)
+        if registro_ref is None:
             return JsonResponse({'error': 'Registro não encontrado na tabela de referência'}, status=404)
-        
-        # Obtém mapeamento de campos (ex: {'a': 'CPF', 'b': 'endereco', 'c': 'nome'})
-        mapping = resolve_fk_display_mapping(campo_estrutura, campo_fk=campo_fk, tabela_ref=tabela_referencia)
-        
-        if not mapping:
-            # Se não houver mapeamento, retorna apenas o campo padrão
-            campo_display = getattr(campo_estrutura, 'campo_display_referencia', 'nome')
-            return JsonResponse({
-                'success': True,
-                'data': {campo_fk: getattr(registro_ref, campo_display, '')}
-            })
-        
-        # Busca valores dos campos mapeados
+
+        mapping = campo_estrutura.get_campo_display_mapping() or {}
+        parent_model = MODEL_MAPPING.get(tabela)
         data = {}
         for local_field, ref_field in mapping.items():
-            try:
-                valor = getattr(registro_ref, ref_field, None)
-                
-                # Formata valores especiais
-                if valor is not None:
-                    if isinstance(valor, (datetime.date, datetime.datetime)):
-                        valor = valor.isoformat()
-                    elif isinstance(valor, decimal.Decimal):
-                        valor = float(valor)
-                    
-                data[local_field] = valor if valor is not None else ''
-            except AttributeError:
-                logger.warning(f"Campo {ref_field} não existe no modelo {tabela_referencia}")
-                data[local_field] = ''
+            local_valid = validate_model_field_name(parent_model, local_field) if parent_model else None
+            ref_valid = validate_model_field_name(reference['modelo'], ref_field)
+            if not local_valid or not ref_valid:
+                continue
+            value = getattr(registro_ref, ref_valid, None)
+            if isinstance(value, (datetime.date, datetime.datetime)):
+                value = value.isoformat()
+            elif isinstance(value, decimal.Decimal):
+                value = float(value)
+            data[local_valid] = value if value is not None else ''
+
+        display_value = resolve_reference_display(reference, registro_ref)
+        if campo_fk not in data:
+            data[campo_fk] = getattr(registro_ref, reference['campo_chave'])
         
         logger.info(f"[FK_RELATED] Retornando dados para {campo_fk}: {data}")
         
         return JsonResponse({
             'success': True,
             'data': data,
-            'tabela_referencia': tabela_referencia
+            'key': str(getattr(registro_ref, reference['campo_chave'])),
+            'display': str(display_value),
+            'tabela_referencia': tabela_referencia,
         })
         
     except Exception as e:
@@ -748,10 +800,9 @@ def resolve_fk_display_mapping(campo_estrutura, campo_fk=None, tabela_ref=None):
     if mapping:
         return mapping
 
-    config = get_referencia_config(campo_estrutura)
-    campo_tela = config.get('campo_tela')
-    if campo_tela:
-        return {campo_tela: campo_tela}
+    config = parse_reference(campo_estrutura)
+    if config.get('campo_local'):
+        return {config['campo_local']: config['campo_display']}
 
     if campo_fk:
         return {campo_fk: campo_fk}
@@ -762,6 +813,7 @@ def resolve_fk_display_mapping(campo_estrutura, campo_fk=None, tabela_ref=None):
     return {}
 
 
+@login_required
 @require_http_methods(["GET"])
 def check_fk_field(request, tabela, campo_fk):
     """
@@ -785,76 +837,61 @@ def check_fk_field(request, tabela, campo_fk):
             logger.warning(f"[CHECK_FK] ⛔ Campo '{campo_fk}' sem tabela_referencia configurada em RppsEstrutura")
             return JsonResponse({'error': 'Campo FK não configurado'}, status=400)
         
-        config = get_referencia_config(campo_config)
-        nome_tabela_ref = config.get('tabela')
-        campo_pk_ref = config.get('campo_tabela')
+        config = parse_reference(campo_config)
+        model_ref = resolve_reference_model(config)
+        config = validate_reference_config(config, model_ref=model_ref)
 
-        if not nome_tabela_ref or not campo_pk_ref:
-            fallback = parse_tabela_referencia(campo_config.tabela_referencia)
-            nome_tabela_ref = nome_tabela_ref or fallback[0]
-            campo_pk_ref = campo_pk_ref or fallback[1]
-
-        # O valor vem com o nome do campo da tabela de referencia.
-        valor_digitado = request.GET.get(campo_pk_ref or campo_fk, '').strip()
-        if not valor_digitado and campo_pk_ref != campo_fk:
+        valor_digitado = request.GET.get(config['campo_chave'], '').strip()
+        if not valor_digitado:
             valor_digitado = request.GET.get(campo_fk, '').strip()
         
         if not valor_digitado:
             return JsonResponse({'error': 'Valor vazio'}, status=400)
         
-        logger.info(f"[CHECK_FK] Buscando '{campo_fk}'='{valor_digitado}' em '{campo_config.tabela_referencia}'")
-        
-        if not nome_tabela_ref or not campo_pk_ref:
-            return JsonResponse({'error': 'Formato de tabela_referencia inválido'}, status=400)
-        
-        model_ref = MODEL_MAPPING.get(nome_tabela_ref)
-        if not model_ref:
-            return JsonResponse({'error': f'Modelo {nome_tabela_ref} não encontrado'}, status=400)
-        
-        # Remove máscara do documento antes de buscar
-        valor_sem_mascara = valor_digitado.replace('.', '').replace('-', '').replace('/', '')
-
-        campo_pk_ref_validado = validate_model_field_name(model_ref, campo_pk_ref)
-        if campo_pk_ref_validado is None:
-            logger.warning("[CHECK_FK] campo_pk_ref rejeitado para %s: %r", nome_tabela_ref, campo_pk_ref)
-            return JsonResponse({'error': 'Campo de referência inválido'}, status=400)
-
-        # Busca na tabela de referência
-        registro_ref = model_ref.objects.filter(**{campo_pk_ref_validado: valor_sem_mascara}).first()
+        logger.info(f"[CHECK_FK] Buscando '{campo_fk}'='{valor_digitado}' em '{config['tabela']}'")
+        valor_busca = normalize_reference_key(
+            valor_digitado,
+            document=campo_config.tipo_campo.lower() == 'varchar5',
+        )
+        _, registro_ref = find_reference_record(config, valor_busca)
 
         if not registro_ref:
-            logger.warning(f"[CHECK_FK] ❌ Registro não encontrado em '{nome_tabela_ref}' com {campo_pk_ref_validado}={valor_sem_mascara}")
+            logger.warning("[CHECK_FK] Registro não encontrado em %s.%s", config['tabela'], config['campo_chave'])
             return JsonResponse({
                 'found': False,
-                'message': f'Registro não encontrado em {nome_tabela_ref}'
+                'key': valor_busca,
+                'can_create': True,
+                'display': None,
+                'message': f"Registro não encontrado em {config['tabela']}"
             })
-        
-        logger.info(f"[CHECK_FK] ✅ Registro encontrado em '{nome_tabela_ref}': {campo_pk_ref}={valor_sem_mascara}")
-        
-        # Obtém mapeamento de campos
-        field_mapping = campo_config.get_campo_display_mapping()
-        logger.info(f"[CHECK_FK] 🗺️ Mapeamento: {field_mapping}")
-        
-        if not field_mapping:
-            return JsonResponse({
-                'found': True,
-                'message': 'Registro encontrado mas sem mapeamento de campos'
-            })
-        
-        # Preenche dados_complementares com os campos mapeados
+
+        display_value = resolve_reference_display(config, registro_ref)
+        field_mapping = campo_config.get_campo_display_mapping() or {}
         dados_complementares = {}
+        parent_model = MODEL_MAPPING.get(tabela)
         for campo_local, campo_referencia in field_mapping.items():
-            valor_ref = getattr(registro_ref, campo_referencia, None)
+            local_valid = validate_model_field_name(parent_model, campo_local) if parent_model else None
+            ref_valid = validate_model_field_name(model_ref, campo_referencia)
+            if not local_valid or not ref_valid:
+                continue
+            valor_ref = getattr(registro_ref, ref_valid, None)
             if valor_ref is not None:
-                dados_complementares[campo_local] = str(valor_ref)
-                logger.info(f"[CHECK_FK] 📝 Mapeando: {campo_local} = {valor_ref} (de {campo_referencia})")
+                dados_complementares[local_valid] = str(valor_ref)
+
+        # A chave do relacionamento permanece distinta do valor exibido.
+        dados_complementares[campo_fk] = str(getattr(registro_ref, config['campo_chave']))
         
         return JsonResponse({
             'found': True,
+            'key': str(getattr(registro_ref, config['campo_chave'])),
+            'display': str(display_value),
             'data': dados_complementares,
-            'message': f'Dados encontrados em {nome_tabela_ref}'
+            'message': f"Dados encontrados em {config['tabela']}"
         })
         
+    except ValueError as exc:
+        logger.warning("[CHECK_FK] Configuração de referência inválida: %s", exc)
+        return JsonResponse({'error': 'Configuração de referência inválida'}, status=400)
     except Exception as e:
         logger.error(f"[CHECK_FK] Erro: {str(e)}", exc_info=True)
         return JsonResponse({'error': str(e)}, status=500)
@@ -937,6 +974,8 @@ def check_record(request, tabela):
                 
                 # Se há parent_table, aplica mapeamento de campo_display_referencia
                 mapped_data = record_data
+                reference_display = None
+                reference_field = None
                 if parent_table:
                     logger.info(f"[CHECK_RECORD] Aplicando mapeamento para parent_table={parent_table}")
                     campo_fk_name = request.GET.get('field_name', '').strip() or request.GET.get('campo_fk', '').strip()
@@ -952,30 +991,23 @@ def check_record(request, tabela):
                             nome_tabela=parent_table,
                             tabela_referencia__icontains=tabela
                         ).first()
-                    
+
                     if campo_fk_config:
-                        mapping = resolve_fk_display_mapping(campo_fk_config, campo_fk=campo_fk_name or campo_fk_config.nome_campo, tabela_ref=tabela)
-                        if not mapping and campo_fk_config.campo_display_referencia:
-                            mapping = campo_fk_config.get_campo_display_mapping() or {}
-                        try:
-                            # Garante que o campo FK local receba o valor da PK da referência se não estiver no mapping
-                            ref_model = MODEL_MAPPING.get(tabela)
-                            ref_pk = ref_model._meta.pk.name if ref_model else 'id'
-                            if campo_fk_config.nome_campo and campo_fk_config.nome_campo not in mapping:
-                                mapping[campo_fk_config.nome_campo] = ref_pk
-                                logger.info(f"[CHECK_RECORD] Fallback mapeado: {campo_fk_config.nome_campo} <- {ref_pk}")
-                        except Exception as e:
-                            logger.warning(f"[CHECK_RECORD] Falha ao aplicar fallback de PK no mapping: {e}")
-                        logger.info(f"[CHECK_RECORD] Mapeamento encontrado: {mapping}")
-                        
-                        # Aplica mapeamento: campo_local -> valor do campo_ref
+                        reference = parse_reference(campo_fk_config)
+                        reference = validate_reference_config(reference, model_ref=record.__class__)
+                        mapping = campo_fk_config.get_campo_display_mapping() or {}
                         mapped_data = {}
                         for local_field, ref_field in mapping.items():
-                            if ref_field in record_data:
-                                mapped_data[local_field] = record_data[ref_field]
-                                logger.info(f"[CHECK_RECORD] Mapeado: {local_field} = {record_data[ref_field]}")
-                            else:
-                                logger.warning(f"[CHECK_RECORD] Campo {ref_field} não encontrado em record_data")
+                            local_valid = validate_model_field_name(model, local_field)
+                            ref_valid = validate_model_field_name(record.__class__, ref_field)
+                            if local_valid and ref_valid:
+                                value = getattr(record, ref_valid, None)
+                                if value is not None:
+                                    mapped_data[local_valid] = value
+                        key_value = getattr(record, reference['campo_chave'])
+                        mapped_data[campo_fk_config.nome_campo] = str(key_value)
+                        reference_display = str(resolve_reference_display(reference, record))
+                        reference_field = campo_fk_config.nome_campo
                 
                 return JsonResponse({
                     'exists': True,
@@ -983,7 +1015,9 @@ def check_record(request, tabela):
                     'message': 'Registro encontrado.',
                     'acao': estrutura_menu.acao,
                     'nome_tela': estrutura_menu.label,
-                    'record': mapped_data
+                    'record': mapped_data,
+                    'display': reference_display,
+                    'reference_field': reference_field,
                 })
             
             # Se é HTMX (blur handler), retorna formulário completo
@@ -1021,51 +1055,30 @@ def check_record(request, tabela):
             
             if valor_digitado:
                 logger.info(f"[CHECK_RECORD] Buscando '{campo_fk.nome_campo}'='{valor_digitado}' em '{campo_fk.tabela_referencia}'")
-                
-                config = get_referencia_config(campo_fk)
-                nome_tabela_ref = config.get('tabela')
-                campo_pk_ref = config.get('campo_tabela')
-
-                if not nome_tabela_ref or not campo_pk_ref:
-                    fallback = parse_tabela_referencia(campo_fk.tabela_referencia)
-                    nome_tabela_ref = nome_tabela_ref or fallback[0]
-                    campo_pk_ref = campo_pk_ref or fallback[1]
-
-                if nome_tabela_ref and campo_pk_ref:
-                    model_ref = MODEL_MAPPING.get(nome_tabela_ref)
-                    
-                    if model_ref:
-                        # Remove máscara do documento antes de buscar
-                        valor_sem_mascara = valor_digitado.replace('.', '').replace('-', '').replace('/', '')
-                        
-                        campo_pk_ref_validado = validate_model_field_name(model_ref, campo_pk_ref)
-                        if campo_pk_ref_validado is None:
-                            logger.warning("[CHECK_RECORD] campo_pk_ref rejeitado para %s: %r", nome_tabela_ref, campo_pk_ref)
-                            continue
-
-                        # Busca na tabela de referência
-                        registro_ref = model_ref.objects.filter(**{campo_pk_ref_validado: valor_sem_mascara}).first()
-
-                        if registro_ref:
-                            logger.info(f"[CHECK_RECORD] ✅ Registro encontrado em '{nome_tabela_ref}': {campo_pk_ref_validado}={valor_sem_mascara}")
-                            
-                            # Obtém mapeamento de campos
-                            field_mapping = campo_fk.get_campo_display_mapping()
-                            logger.info(f"[CHECK_RECORD] 🗺️ Mapeamento encontrado: {field_mapping}")
-                            
-                            if field_mapping:
-                                # Preenche dados_complementares com os campos mapeados
-                                for campo_local, campo_referencia in field_mapping.items():
-                                    valor_ref = getattr(registro_ref, campo_referencia, None)
-                                    if valor_ref is not None:
-                                        dados_complementares[campo_local] = valor_ref
-                                        logger.info(f"[CHECK_RECORD] 📝 Mapeando: {campo_local} = {valor_ref} (de {campo_referencia})")
-                                    else:
-                                        logger.warning(f"[CHECK_RECORD] ⚠️ Campo '{campo_referencia}' não existe em {nome_tabela_ref}")
-                            else:
-                                logger.warning(f"[CHECK_RECORD] ⚠️ campo_display_referencia vazio ou inválido para '{campo_fk.nome_campo}'")
-                        else:
-                            logger.warning(f"[CHECK_RECORD] ❌ Registro não encontrado em '{nome_tabela_ref}' com {campo_pk_ref}={valor_sem_mascara}")
+                try:
+                    reference = parse_reference(campo_fk)
+                    related_model = resolve_reference_model(reference)
+                    reference = validate_reference_config(reference, model_ref=related_model)
+                    lookup_value = normalize_reference_key(
+                        valor_digitado,
+                        document=campo_fk.tipo_campo.lower() == 'varchar5',
+                    )
+                    _, registro_ref = find_reference_record(reference, lookup_value)
+                    if registro_ref:
+                        for local_name, reference_name in (campo_fk.get_campo_display_mapping() or {}).items():
+                            local_valid = validate_model_field_name(model, local_name)
+                            reference_valid = validate_model_field_name(related_model, reference_name)
+                            if local_valid and reference_valid:
+                                value = getattr(registro_ref, reference_valid, None)
+                                if value is not None:
+                                    dados_complementares[local_valid] = value
+                        key_value = getattr(registro_ref, reference['campo_chave'])
+                        if campo_fk.tipo_campo.lower() == 'varchar5':
+                            key_value = aplicar_mascara_documento(str(key_value))
+                        dados_complementares[campo_fk.nome_campo] = key_value
+                        resolve_reference_display(reference, registro_ref)
+                except ValueError as exc:
+                    logger.warning("[CHECK_RECORD] Referência inválida para %s: %s", campo_fk.nome_campo, exc)
 
         if 'Hx-Request' in request.headers:
             dados = request.GET.dict()
@@ -1307,6 +1320,11 @@ def aplicar_mascaras_initial_data(tabela, initial_data, model):
     
     return initial_data
 
+def is_crud_copy_action(acao):
+    # O cadastro de menu usa tanto 'CRUD-C' quanto 'CRUD_C'.
+    return str(acao or '').strip().upper().replace('_', '-') == 'CRUD-C'
+
+
 def build_form_context(tabela, form=None, record_id=None, exists=False, initial_context=None):
     """
     Constrói o contexto base para renderização de formulários. 
@@ -1323,6 +1341,33 @@ def build_form_context(tabela, form=None, record_id=None, exists=False, initial_
     """
     try:
         estrutura_menu = get_object_or_404(EstruturaMenu, arquivo=tabela)
+        copy_action_context = {}
+        if is_crud_copy_action(estrutura_menu.acao):
+            copy_parameters = parse_copy_action_parameters(estrutura_menu.parametros_acao)
+            copy_model = apps.get_model(estrutura_menu.aplicativo, estrutura_menu.arquivo)
+            copy_period_fields = []
+            for period_spec in validate_period_fields_metadata(copy_model, tabela, copy_parameters):
+                period_type = period_spec['type']
+                size = period_spec['size']
+                is_digits = period_type == 'int'
+                input_type = {
+                    'decimal': 'number', 'date': 'date',
+                    'datetime': 'datetime-local', 'time': 'time',
+                }.get(period_type, 'text')
+                copy_period_fields.append({
+                    'name': period_spec['name'],
+                    'label': period_spec['label'],
+                    'input_type': input_type,
+                    'size': size,
+                    'digits_only': is_digits,
+                    'maxlength': size if input_type == 'text' else None,
+                })
+            copy_action_context = {
+                'copy_enabled': True,
+                'copy_action_url': reverse('copy_period_records', kwargs={'tabela': tabela}),
+                'copy_action_parameters': copy_parameters,
+                'copy_period_fields': copy_period_fields,
+            }
         
         # Campos chave e ordem máxima de blur
         campos_chave = []
@@ -1337,19 +1382,18 @@ def build_form_context(tabela, form=None, record_id=None, exists=False, initial_
         for campo in RppsEstrutura.objects.filter(nome_tabela=tabela).order_by('ordem_campo'):
             # Se tem tabela_referencia, adiciona ao fk_modal_tables
             if campo.tabela_referencia and campo.tabela_referencia.strip():
-                # Extrai apenas o nome da tabela do formato "Tabela(CampoTabela=CampoTela)"
-                nome_tabela_ref, campo_tabela, campo_tela = parse_tabela_referencia(campo.tabela_referencia)
+                reference = parse_reference(campo)
+                nome_tabela_ref = reference.get('tabela')
                 
                 if nome_tabela_ref:
                     fk_modal_tables[campo.nome_campo] = nome_tabela_ref
-                    logger.info(f"[FK_BUTTON] {campo.nome_campo} -> modal {nome_tabela_ref} (campo_tabela: {campo_tabela}, campo_tela: {campo_tela or 'todos'})")
-                
-                    config = get_referencia_config(campo)
+                    logger.info("[FK_BUTTON] %s -> modal %s (campo-chave: %s)", campo.nome_campo, nome_tabela_ref, reference.get('campo_chave'))
+
                     field_mapping = campo.get_campo_display_mapping()
                     fk_field_mappings[campo.nome_campo] = {
                         'tabela_referencia': nome_tabela_ref,
                         'tabela_referencia_dsl': campo.tabela_referencia,
-                        'campo_busca_referencia': config.get('campo_tabela') or campo_tabela,
+                        'campo_busca_referencia': reference.get('campo_chave'),
                         'mapping': field_mapping
                     }
         
@@ -1365,18 +1409,20 @@ def build_form_context(tabela, form=None, record_id=None, exists=False, initial_
                         
                         # Processa ForeignKeys que são chave
                         if is_foreign_key_field(campo.tipo_chave_blur) and campo.tabela_referencia:
-                            # Extrai nome da tabela do formato "Tabela(CampoTabela=CampoTela)"
-                            nome_tabela_ref, campo_tabela, campo_tela = parse_tabela_referencia(campo.tabela_referencia)
+                            reference = parse_reference(campo)
+                            nome_tabela_ref = reference.get('tabela')
                             
                             if nome_tabela_ref:
-                                model_ref = MODEL_MAPPING.get(nome_tabela_ref)
+                                model_ref = resolve_reference_model(reference)
                             
                                 if model_ref:
-                                    campo_display = getattr(campo, 'campo_display_referencia', 'nome')
+                                    reference = validate_reference_config(reference, model_ref=model_ref)
+                                    campo_display = reference['campo_display']
                                     
                                     campos_select_config[campo.nome_campo] = {
                                         'tabela_referencia': nome_tabela_ref,
                                         'campo_display': campo_display,
+                                        'campo_chave': reference['campo_chave'],
                                         'url_filter': f'/api/filter/{nome_tabela_ref}/',
                                         'min_length': 5,
                                         'check_url': reverse('check_record', kwargs={'tabela': tabela})
@@ -1390,7 +1436,7 @@ def build_form_context(tabela, form=None, record_id=None, exists=False, initial_
                                             campos_foreign_keys[campo.nome_campo] = []
                                         else:
                                             try:
-                                                registros = model_ref.objects.all().values('id', campo_display_validado).order_by(campo_display_validado)
+                                                registros = model_ref.objects.all().values(reference['campo_chave'], campo_display_validado).order_by(campo_display_validado)
                                                 campos_foreign_keys[campo.nome_campo] = list(registros)
                                             except Exception as e:
                                                 logger.warning(f"Erro ao pré-carregar FK {campo.nome_campo}: {str(e)}")
@@ -1431,6 +1477,8 @@ def build_form_context(tabela, form=None, record_id=None, exists=False, initial_
         if initial_context:
             context.update(initial_context)
 
+        context.update(copy_action_context)
+
         return context
 
     except Exception as e:
@@ -1449,7 +1497,6 @@ def handle_invalid_form(request, form, tabela, record_id):
 
 def handle_form_action(request, model, form, record_id):
     """Processa as ações do formulário (salvar/excluir). Retorna dict com resultado."""
-    from .models import Cadastro
     from django.db import IntegrityError
     import re
     
@@ -1513,21 +1560,59 @@ def handle_form_action(request, model, form, record_id):
                 cleaned_data[pk_field] = re.sub(r'[.\-/]', '', pk_value_str)
                 logger.debug("Máscara removida da chave primária %s", pk_field)
 
-        for field in model._meta.fields:
-            field_name = field.name
-            if field_name in cleaned_data:
-                if hasattr(field, 'related_model') and field.related_model and field.related_model.__name__ == 'Cadastro':
-                    cpf_cnpj_valor = cleaned_data[field_name]
-                    if cpf_cnpj_valor:
-                        cpf_cnpj_limpo = re.sub(r'[.\-/]', '', str(cpf_cnpj_valor))
-                        try:
-                            cadastro_obj = Cadastro.objects.get(CpfCnpj=cpf_cnpj_limpo)
-                            cleaned_data[field_name] = cadastro_obj
-                            logger.debug("Relacionamento resolvido para %s via Cadastro", field_name)
-                        except Cadastro.DoesNotExist:
-                            raise ValueError(f"CPF/CNPJ {cpf_cnpj_limpo} não encontrado na tabela Cadastro. Por favor, cadastre-o primeiro.")
-                    else:
-                        cleaned_data[field_name] = None
+        estruturas_fk = RppsEstrutura.objects.filter(
+            nome_tabela=model._meta.db_table,
+            tabela_referencia__isnull=False,
+        ).exclude(tabela_referencia='')
+        if not estruturas_fk.exists():
+            estruturas_fk = RppsEstrutura.objects.filter(
+                nome_tabela=model.__name__,
+                tabela_referencia__isnull=False,
+            ).exclude(tabela_referencia='')
+
+        for estrutura in estruturas_fk:
+            field_name = estrutura.nome_campo
+            if field_name not in cleaned_data:
+                continue
+            submitted_value = cleaned_data[field_name]
+            if submitted_value in (None, ''):
+                if not estrutura.obrigatorio:
+                    cleaned_data[field_name] = None
+                    continue
+                raise ValueError(f"A chave da referência para '{field_name}' é obrigatória.")
+
+            reference = parse_reference(estrutura)
+            related_model = resolve_reference_model(reference)
+            reference = validate_reference_config(reference, model_ref=related_model)
+            value = normalize_reference_key(
+                submitted_value,
+                document=estrutura.tipo_campo.lower() == 'varchar5',
+            )
+
+            _, related_record = find_reference_record(reference, value)
+            if related_record is None:
+                raise ValueError(
+                    f"A chave informada para '{field_name}' não existe em {reference['tabela']}. "
+                    "Cadastre o registro relacionado antes de salvar."
+                )
+
+            try:
+                model_field = model._meta.get_field(field_name)
+            except Exception as exc:
+                raise ValueError(f"Campo de referência '{field_name}' não existe no modelo principal.") from exc
+
+            if getattr(model_field, 'many_to_one', False):
+                if model_field.related_model != related_model:
+                    raise ValueError(f"O modelo relacionado configurado para '{field_name}' não corresponde ao Model.")
+                target_field = model_field.target_field.name
+                if target_field != reference['campo_chave']:
+                    raise ValueError(
+                        f"A chave configurada para '{field_name}' deve corresponder ao campo "
+                        f"{target_field!r} do relacionamento do Model."
+                    )
+                cleaned_data[field_name] = related_record
+            else:
+                cleaned_data[field_name] = getattr(related_record, reference['campo_chave'])
 
         logger.debug("Dados processados para salvamento no modelo %s", model.__name__)
 
@@ -1542,11 +1627,17 @@ def handle_form_action(request, model, form, record_id):
 
             for field, value in cleaned_data.items():
                 setattr(record, field, value)
-            record.save()
+            try:
+                record.save()
+            except IntegrityError as exc:
+                raise ValueError('Não foi possível atualizar: a chave já existe ou viola uma restrição de integridade.') from exc
             logger.info("Registro %s atualizado com sucesso na tabela %s", record_id, model.__name__)
             return {'success': True, 'message': 'Registro atualizado com sucesso!', 'action': 'update', 'record_id': record_id}
         else:
-            record = model.objects.create(**cleaned_data)
+            try:
+                record = model.objects.create(**cleaned_data)
+            except IntegrityError as exc:
+                raise ValueError('Não foi possível cadastrar: a chave já existe ou viola uma restrição de integridade.') from exc
             pk_value = getattr(record, pk_field)
             logger.info("Novo registro criado com sucesso na tabela %s", model.__name__)
             return {'success': True, 'message': 'Registro criado com sucesso!', 'action': 'create', 'record_id': pk_value}
@@ -1603,6 +1694,24 @@ def tratamento_record(request, tabela, record_id=None):
                     result = handle_form_action(request, model, form, record_id)
 
                     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+                        parent_table = request.POST.get('parent_table', '').strip()
+                        fk_field_name = request.POST.get('fk_field_name', '').strip()
+                        if result.get('success') and result.get('action') == 'create' and parent_table and fk_field_name:
+                            parent_config = RppsEstrutura.objects.filter(
+                                nome_tabela=parent_table,
+                                nome_campo=fk_field_name,
+                            ).first()
+                            if parent_config and parent_config.tabela_referencia:
+                                reference = parse_reference(parent_config)
+                                related_model = resolve_reference_model(reference)
+                                reference = validate_reference_config(reference, model_ref=related_model)
+                                if related_model == model:
+                                    created = model.objects.get(**{model._meta.pk.name: result['record_id']})
+                                    result['reference'] = {
+                                        'field': fk_field_name,
+                                        'key': str(getattr(created, reference['campo_chave'])),
+                                        'display': str(resolve_reference_display(reference, created)),
+                                    }
                         return JsonResponse(result)
 
                     messages.success(request, result.get('message', 'Operação realizada com sucesso!'))
@@ -1630,24 +1739,80 @@ def tratamento_record(request, tabela, record_id=None):
         return redirect('menu')
 
 
-def obter_tabelas_relacionadas(tipo_xml_param):
+@login_required
+@require_http_methods(["POST"])
+def copy_period_records_view(request, tabela):
+    menu_item = get_object_or_404(EstruturaMenu, arquivo=tabela)
+    if not is_crud_copy_action(menu_item.acao):
+        return JsonResponse({'error': 'A cópia não está habilitada para esta ação.'}, status=404)
+    if menu_item.requer_permissao:
+        permission = f'{menu_item.aplicativo}.view_{menu_item.arquivo.lower()}'
+        if not request.user.has_perm(permission):
+            return JsonResponse({'error': 'Sem permissão para copiar registros.'}, status=403)
+
+    try:
+        parameters = parse_copy_action_parameters(menu_item.parametros_acao)
+        model = apps.get_model(menu_item.aplicativo, menu_item.arquivo)
+        if model is None:
+            return JsonResponse({'error': 'Modelo da tabela não encontrado.'}, status=404)
+
+        source_values = {
+            field_name: request.POST.get(f'origem_{field_name}')
+            for field_name in get_period_field_names(parameters)
+        }
+        destination_values = {
+            field_name: request.POST.get(f'destino_{field_name}')
+            for field_name in get_period_field_names(parameters)
+        }
+        phase = request.POST.get('fase')
+
+        if phase == 'preview':
+            preview = preview_period_copy(model, tabela, parameters, source_values, destination_values)
+            return JsonResponse({'success': True, 'fase': 'preview', 'encontrados': preview['found']})
+
+        if phase != 'execute':
+            return JsonResponse({'error': 'Etapa de cópia inválida.'}, status=400)
+        if parameters.get('confirmar', True) and request.POST.get('confirmado') != 'true':
+            return JsonResponse({'error': 'Confirme a cópia antes de gravar.'}, status=400)
+
+        result = copy_period_records(model, tabela, parameters, source_values, destination_values)
+        return JsonResponse({
+            'success': True,
+            'fase': 'execute',
+            'found': result['found'],
+            'copied': result['copied'],
+            'ignored': result['ignored'],
+            'errors': result['errors'],
+        })
+    except ValueError as exc:
+        return JsonResponse({'error': str(exc)}, status=400)
+    except Exception:
+        logger.exception('Erro ao copiar registros de %s', tabela)
+        return JsonResponse({'error': 'Não foi possível copiar os registros.'}, status=500)
+
+
+def obter_tabelas_relacionadas(tipo_xml_param, ano_ref=None, mes_ref=None):
     """
-    Retorna as tabelas e filtros definidos no cadastro de TipoXml para o TipoXml informado.
+    Retorna as tabelas e filtros definidos no cadastro de TipoXml para o TipoXml/ano_ref/mes_ref informados.
     Retorna uma lista de tuplas (Nomarq, campo_filter, ordem_xml) ou uma lista vazia em caso de erro/sem dados.
     """
     try:
         if not tipo_xml_param:
             logger.warning("TipoXml não fornecido para obter_tabelas_relacionadas.")
             return []
-        
+
         with connection.cursor() as cursor:
+            # TipoXml guarda uma linha de configuração por período; sem filtrar por
+            # ano_ref/mes_ref, linhas duplicadas/incorretas de outros períodos vazam para cá.
             cursor.execute("""
-                SELECT Nomarq, campo_filter, ordem_xml 
+                SELECT DISTINCT Nomarq, campo_filter, ordem_xml 
                 FROM [rpps].[dbo].TipoXml 
                 WHERE TipoXml = %s 
+                  AND ano_ref = %s
+                  AND mes_ref = %s
                   AND campo_filter IS NOT NULL
-                ORDER BY ordem_xml, mes_ref
-            """, [tipo_xml_param])
+                ORDER BY ordem_xml
+            """, [tipo_xml_param, ano_ref, mes_ref])
             
             return cursor.fetchall()
         
@@ -1702,18 +1867,26 @@ def buscar_registros(request, ano_ref, mes_ref, TipoFundo, nome_tabela, campo_fi
         if valores_tela['TipoFundo'] is None:
             raise ValueError(f"Filtro 'TipoFundo' não informado para a tabela '{tabela_validada}'.")
 
-        if valores_tela['TipoFundo'] == '1':
+        TipoFundo_valor = valores_tela['TipoFundo']
+
+        if TipoFundo_valor == 1:
             where_clauses.append(f"{connection.ops.quote_name('TipoFundo')} IN (%s, %s)")
-            params.extend(['1', '5'])
-        elif valores_tela['TipoFundo'] == '2':
+            params.extend([1, 5])
+        elif TipoFundo_valor == 2:
             where_clauses.append(f"{connection.ops.quote_name('TipoFundo')} IN (%s, %s)")
-            params.extend(['2', '5'])
-        elif valores_tela['TipoFundo'] == '3':
-            where_clauses.append(f"{connection.ops.quote_name('TipoFundo')} IN (%s)")
-            params.extend(['5'])
+            params.extend([2, 5])
+        elif TipoFundo_valor == 3:
+            where_clauses.append(f"{connection.ops.quote_name('TipoFundo')} = %s")
+            params.append(3)
+        elif TipoFundo_valor == 4:  # Todos os fundos físicos (1+2+3); TipoFundo=5 é compartilhado, não entra aqui
+            where_clauses.append(f"{connection.ops.quote_name('TipoFundo')} IN (%s, %s, %s)")
+            params.extend([1, 2, 3])
+        elif TipoFundo_valor == 5:  # Todos exceto Militar (1+2), incluindo os registros compartilhados (5)
+            where_clauses.append(f"{connection.ops.quote_name('TipoFundo')} IN (%s, %s, %s)")
+            params.extend([1, 2, 5])
         else:
             where_clauses.append(f"{connection.ops.quote_name('TipoFundo')} = %s")
-            params.append(valores_tela['TipoFundo'])
+            params.append(TipoFundo_valor)
 
     if campo_filter:
         try:
@@ -1766,15 +1939,27 @@ def obter_dados_fundo(ano_ref, mes_ref, TipoFundo):
     """Obtém os dados básicos do fundo (Codigo, Exercicio, Mes)"""
     try:
         with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT [ano_ref] as Exercicio
-                      ,[mes_ref] as Mes
-                      ,[ug] as Codigo
-                FROM [rpps].[dbo].[Fundo]
-                WHERE ano_ref = %s
-                  AND mes_ref = %s
-                  AND TipoFundo = %s
-            """, [ano_ref, mes_ref, TipoFundo])
+            # TipoFundo 4 (Todos) e 5 (Todos exceto 3) são valores agregados que não existem
+            # na tabela Fundo (que só possui 1, 2 ou 3), então não filtramos por TipoFundo.
+            if TipoFundo in (4, 5):
+                cursor.execute("""
+                    SELECT TOP 1 [ano_ref] as Exercicio
+                          ,[mes_ref] as Mes
+                          ,[ug] as Codigo
+                    FROM [rpps].[dbo].[Fundo]
+                    WHERE ano_ref = %s
+                      AND mes_ref = %s
+                """, [ano_ref, mes_ref])
+            else:
+                cursor.execute("""
+                    SELECT [ano_ref] as Exercicio
+                          ,[mes_ref] as Mes
+                          ,[ug] as Codigo
+                    FROM [rpps].[dbo].[Fundo]
+                    WHERE ano_ref = %s
+                      AND mes_ref = %s
+                      AND TipoFundo = %s
+                """, [ano_ref, mes_ref, TipoFundo])
             return cursor.fetchone()
     except Exception as e:
         logger.error(f"Erro ao buscar dados do fundo: {e}", exc_info=True)
@@ -1805,9 +1990,9 @@ def gerar_arquivo_xml(nome_tabela, campos_xml, registros, dados_fundo, TipoFundo
 
         ugs_para_gerar = []
         if TipoFundo == 1:
-            ugs_para_gerar = [1]
+            ugs_para_gerar = [1,5]
         elif TipoFundo == 2:
-            ugs_para_gerar = [2]
+            ugs_para_gerar = [2,5]
         elif TipoFundo == 3:
             ugs_para_gerar = [3]
         elif TipoFundo == 4:
@@ -1989,7 +2174,7 @@ def gerar_xml_view(request, tabela):
         dados_fundo = obter_dados_fundo(ano_ref, mes_ref, TipoFundo)
         logger.debug("Dados do fundo obtidos para %s", tabela)
 
-        tabelas = obter_tabelas_relacionadas(TipoXml)
+        tabelas = obter_tabelas_relacionadas(TipoXml, ano_ref, mes_ref)
         logger.debug("Tabelas relacionadas identificadas para TipoXml %s: %s", TipoXml, len(tabelas))
 
         if not tabelas:

@@ -1,7 +1,7 @@
 from django import template
 import json
 
-from app_rpps.metadata_helpers import parse_referencia_dependencias
+from app_rpps.services.referencia_service import build_referencia_filters
 
 register = template.Library()
 
@@ -69,7 +69,7 @@ def render_fk_field_with_mapping(field, field_name, fk_mappings):
         attrs['data-fk-search-field'] = mapping_info.get('campo_busca_referencia', '')
         ref_dsl = mapping_info.get('tabela_referencia_dsl') or mapping_info.get('tabela_referencia', '')
         if ref_dsl:
-            attrs['data-fk-deps'] = json.dumps(parse_referencia_dependencias(ref_dsl))
+            attrs['data-fk-deps'] = json.dumps(build_referencia_filters(ref_dsl))
         
         # Converte o mapeamento para JSON string
         mapping_dict = mapping_info.get('mapping', {})

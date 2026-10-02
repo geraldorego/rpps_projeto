@@ -437,7 +437,7 @@ def normalize_reference_name(value):
 
 
 def parse_referencia_dependencias(tabela_referencia):
-    """Extrai o mapeamento {campo_ref: campo_local} do DSL de referência."""
+    """Extrai todos os pares {campo_ref: campo_local}, inclusive o par-chave inicial."""
     if tabela_referencia is None:
         return {}
 
@@ -445,16 +445,16 @@ def parse_referencia_dependencias(tabela_referencia):
     if not valor or '(' not in valor or ')' not in valor:
         return {}
 
-    _, _, campo_tela = parse_tabela_referencia(valor)
-    if not campo_tela:
-        return {}
-
+    conteudo = valor.split('(', 1)[1].split(')', 1)[0]
     dependencias = {}
-    for parte in campo_tela.split(','):
+    for parte in conteudo.split(','):
         parte = parte.strip()
-        if not parte or '=' not in parte:
+        if not parte:
             continue
-        campo_tabela, campo_local = [item.strip() for item in parte.split('=', 1)]
+        if '=' in parte:
+            campo_tabela, campo_local = [item.strip() for item in parte.split('=', 1)]
+        else:
+            campo_tabela = campo_local = parte
         if campo_tabela and campo_local:
             dependencias[campo_tabela] = campo_local
     return dependencias

@@ -13,13 +13,12 @@ from django.core.exceptions import ValidationError
 from .metadata_helpers import (
     is_primary_key_field,
     normalize_reference_name,
-    parse_tabela_referencia,
-    parse_referencia_config,
-    parse_referencia_dependencias,
-    validate_table_name,
-    validate_column_name,
-    validate_columns,
-    safe_model_filter,
+)
+from .services.referencia_service import (
+    get_reference_options,
+    parse_reference,
+    resolve_reference_model,
+    validate_reference_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,62 +146,10 @@ class DynamicFormGenerator:
     
 
     def _resolve_value_and_label_fields(self, model_ref, campo=None):
-        """Resolve os campos de valor e rótulo a partir do metadado do campo ou do modelo.
-
-        A regra principal é: quando existe campo_display_referencia, os campos devem seguir
-        exatamente o mapeamento definido no metadado, e não cair em candidatos genéricos como Nome.
-        """
-        model_fields = {field.name for field in model_ref._meta.fields}
-        pk_name = model_ref._meta.pk.name if model_ref._meta.pk else 'id'
-
-        value_field = pk_name
-        label_field = None
-
-        if campo and campo.campo_display_referencia:
-            mapping = campo.get_campo_display_mapping() or {}
-            mapped_ref_fields = []
-
-            for local_field, ref_field in mapping.items():
-                if local_field == campo.nome_campo and ref_field in model_fields:
-                    value_field = ref_field
-                    label_field = ref_field
-                    break
-                if ref_field in model_fields:
-                    mapped_ref_fields.append(ref_field)
-
-            if value_field not in model_fields and mapped_ref_fields:
-                value_field = mapped_ref_fields[0]
-                label_field = mapped_ref_fields[0]
-
-            if value_field in model_fields:
-                return value_field, label_field or value_field
-
-        if value_field not in model_fields:
-            for candidate in ('Codigo', 'codigo', 'CPF', 'cpf', 'Cnpj', 'cnpj', 'id'):
-                if candidate in model_fields:
-                    value_field = candidate
-                    break
-
-        if value_field == 'id' and 'Codigo' in model_fields:
-            value_field = 'Codigo'
-
-        for candidate in ('Nome', 'nome', 'Descricao', 'descricao', 'Codigo', 'codigo', 'CPF', 'cpf', 'Cnpj', 'cnpj', value_field):
-            if candidate in model_fields and candidate != value_field:
-                label_field = candidate
-                break
-
-        if value_field not in model_fields:
-            value_field = next(iter(model_fields), None)
-        if label_field not in model_fields:
-            label_field = value_field
-
-        if label_field is None:
-            label_field = value_field
-
-        if label_field is None:
-            label_field = value_field
-
-        return value_field, label_field
+        if campo and campo.tabela_referencia:
+            config = validate_reference_config(parse_reference(campo), model_ref=model_ref)
+            return config['campo_chave'], config['campo_display']
+        return model_ref._meta.pk.name, model_ref._meta.pk.name
 
     def _resolve_dependencias(self, mapeamento_dependencias, dependencias=None):
         """Resolve o mapeamento de dependências usando os valores da tela e do form atual."""
@@ -247,61 +194,27 @@ class DynamicFormGenerator:
         if not valor:
             return []
 
-        dependencias = dependencias or {}
-
         try:
-            config = parse_referencia_config(valor)
-            nome_tabela = config.get('tabela')
-            campo_tabela = config.get('campo_tabela')
-            campo_tela = config.get('campo_tela')
-
-            if not nome_tabela:
-                nome_tabela, campo_tabela, campo_tela = parse_tabela_referencia(valor)
-            if not nome_tabela:
-                return []
-
-            nome_tabela_validada = validate_table_name(nome_tabela)
-            model_ref = apps.get_model('app_rpps', nome_tabela_validada)
-            if model_ref is None:
-                logger.warning(f"Modelo não encontrado para tabela_referencia: {nome_tabela_validada}")
-                return []
-
-            campos_modelo = {field.name for field in model_ref._meta.get_fields() if getattr(field, 'concrete', True)}
-            if campo_tabela:
-                campo_tabela_validado = validate_column_name(nome_tabela_validada, campo_tabela)
-                if campo_tabela_validado not in campos_modelo:
-                    logger.warning("Campo de referência %r rejeitado para tabela %r", campo_tabela, nome_tabela_validada)
-                    return []
-
-            queryset = model_ref.objects.all()
-
-            mapeamento_dependencias = config.get('filtros') or parse_referencia_dependencias(valor)
-            if mapeamento_dependencias:
-                filtros = self._resolve_dependencias(mapeamento_dependencias, dependencias)
-                if len(filtros) != len(mapeamento_dependencias):
-                    logger.info(
-                        "Dependências para %s incompletas; aguardando valores da tela. Mapeamento=%s, valores=%s",
-                        nome_tabela_validada,
-                        mapeamento_dependencias,
-                        dependencias,
-                    )
-                    return []
-
-                queryset = queryset.filter(**safe_model_filter(model_ref, filtros))
-
-            if not queryset.exists():
-                return []
-
-            value_field, label_field = self._resolve_value_and_label_fields(model_ref, campo=campo)
-            queryset = queryset.order_by(label_field or value_field)
-
-            resultados = []
-            for valor_ref, label_ref in queryset.values_list(value_field, label_field):
-                if valor_ref is None:
-                    continue
-                resultados.append((str(valor_ref), str(label_ref) if label_ref is not None else str(valor_ref)))
-
-            return resultados
+            config = parse_reference(campo or valor)
+            model_ref = resolve_reference_model(config)
+            config = validate_reference_config(config, model_ref=model_ref)
+            form_values = dependencias or self.initial
+            dependency_values = {
+                local_name: next(
+                    (value for key, value in form_values.items()
+                     if normalize_reference_name(key) == normalize_reference_name(local_name)),
+                    None,
+                )
+                for local_name in config['filtros'].values()
+            }
+            return [
+                (str(key), str(display) if display is not None else str(key))
+                for key, display in get_reference_options(
+                    config,
+                    filtros=dependency_values if config['filtros'] else None,
+                )
+                if key is not None
+            ]
 
         except ValueError as exc:
             logger.warning("tabela_referencia rejeitada em _get_referencia_options: %s. %s", valor, exc)
@@ -355,7 +268,7 @@ class DynamicFormGenerator:
                 initial=initial,
                 validators=[
                     RegexValidator(
-                        r'^(\d{3}\.\d{3}\.\d{3}-\d{2}|\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})$',
+                        r'^(\d{11}|\d{14}|\d{3}\.\d{3}\.\d{3}-\d{2}|\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})$',
                         'Formato inválido para CPF (000.000.000-00) ou CNPJ (00.000.000/0000-00)'
                     )
                 ],

@@ -1,4 +1,5 @@
 from django.db import connection
+from django.utils.html import format_html, format_html_join
 
 from .metadata_helpers import validate_table_name, validate_columns, validate_column_name
 
@@ -46,24 +47,20 @@ def format_referencia_html(dados, config):
     
     if tipo == 'tabela':
         classes = params.get('css_class', 'table table-sm')
-        html = f'<table class="{classes}">'
-        
+        html = format_html('<table class="{}">', classes)
         if params.get('mostrar_cabecalho', True):
-            html += '<tr>' + ''.join(f'<th>{c}</th>' for c in campos) + '</tr>'
-        
+            html += format_html('<tr>{}</tr>', format_html_join('', '<th>{}</th>', ((field,) for field in campos)))
         for item in dados:
-            html += '<tr>' + ''.join(f'<td>{item.get(c, "")}</td>' for c in campos) + '</tr>'
-        return html + '</table>'
+            html += format_html('<tr>{}</tr>', format_html_join('', '<td>{}</td>', ((item.get(field, ''),) for field in campos)))
+        return format_html('{} </table>', html)
     
     elif tipo == 'lista':
-        return '<ul class="list-group">' + \
-               ''.join(f'<li class="list-group-item">{item.get(campos[1], "")}</li>' for item in dados) + \
-               '</ul>'
+        items = format_html_join('', '<li class="list-group-item">{}</li>', ((item.get(campos[1], ''),) for item in dados))
+        return format_html('<ul class="list-group">{}</ul>', items)
     
     else:  # Default é label
-        return '<div class="ref-label">' + \
-               '<br>'.join(item.get(campos[1], "") for item in dados) + \
-               '</div>'
+        lines = format_html_join('<br>', '{}', ((item.get(campos[1], ''),) for item in dados))
+        return format_html('<div class="ref-label">{}</div>', lines)
 
 
 def aplicar_mascara_documento(valor):

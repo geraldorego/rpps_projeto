@@ -19,7 +19,7 @@
      */
     function initFKRelatedFields() {
         console.log('[FK_RELATED] Inicializando sistema de campos relacionados...');
-        
+
         // Aguarda carregamento completo do DOM
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', setupFieldListeners);
@@ -33,7 +33,7 @@
      */
     function setupFieldListeners() {
         const fkFields = document.querySelectorAll('[data-fk-field]');
-        
+
         if (fkFields.length === 0) {
             console.log('[FK_RELATED] Nenhum campo FK com mapeamento encontrado');
             return;
@@ -44,6 +44,10 @@
         const hasJQuery = typeof window.jQuery !== 'undefined' && typeof window.$ !== 'undefined';
 
         fkFields.forEach(field => {
+            // Compartilha a trava com main.js para evitar listeners e AJAX duplicados.
+            if (field.dataset.appRppsRelatedBound === 'true') return;
+            field.dataset.appRppsRelatedBound = 'true';
+
             const fieldName = field.getAttribute('data-fk-field');
             const tabelaReferencia = field.getAttribute('data-tabela-ref');
             const fieldMapping = field.getAttribute('data-field-mapping');
@@ -81,10 +85,22 @@
             return;
         }
 
+        const requestedValue = String(fkId);
+        let requestedValues = [];
+        try {
+            requestedValues = JSON.parse(field.dataset.appRppsRelatedRequestedValues || '[]');
+        } catch (error) {
+            requestedValues = [];
+        }
+        if (requestedValues.includes(requestedValue)) return;
+        requestedValues.push(requestedValue);
+        field.dataset.appRppsRelatedRequestedValues = JSON.stringify(requestedValues);
+
         console.log(`[FK_RELATED] Mudança detectada em ${fieldName}: FK ID = ${fkId}`);
 
         // Obtém tabela principal do formulário
-        const tabela = document.querySelector('[data-tabela]')?.getAttribute('data-tabela');
+        const tabelaElement = document.querySelector('[data-tabela]');
+        const tabela = tabelaElement ? tabelaElement.getAttribute('data-tabela') : null;
         if (!tabela) {
             console.error('[FK_RELATED] Tabela principal não encontrada');
             return;
@@ -107,9 +123,9 @@
             .then(data => {
                 hideLoadingIndicator(field);
 
-                if (data.success && data.data) {
+                if (String(field.value || '') === requestedValue && data.success && data.data) {
                     console.log('[FK_RELATED] Dados recebidos:', data.data);
-                    fillRelatedFields(data.data);
+                    fillRelatedFields(data.data, field);
                 } else {
                     console.warn('[FK_RELATED] Resposta sem dados:', data);
                 }
@@ -117,7 +133,7 @@
             .catch(error => {
                 hideLoadingIndicator(field);
                 console.error('[FK_RELATED] Erro ao buscar dados:', error);
-                
+
                 // Exibe mensagem de erro amigável
                 showErrorMessage(`Erro ao buscar dados relacionados: ${error.message}`);
             });
@@ -126,21 +142,23 @@
     /**
      * Preenche campos locais com dados da referência
      */
-    function fillRelatedFields(data) {
+    function fillRelatedFields(data, sourceField) {
         Object.entries(data).forEach(([localField, value]) => {
-            const targetField = document.querySelector(`[name="${localField}"]`) || 
-                                document.getElementById(`id_${localField}`);
-            
-            if (targetField) {
+            const targetField = document.querySelector(`[name="${localField}"]`) ||
+                document.getElementById(`id_${localField}`);
+
+            if (targetField && targetField !== sourceField) {
                 // Limpa valor anterior
-                targetField.value = value || '';
-                
+                const nextValue = value == null ? '' : String(value);
+                if (String(targetField.value || '') === nextValue) return;
+                targetField.value = nextValue;
+
                 // Dispara evento de mudança para atualizar validações
                 targetField.dispatchEvent(new Event('change', { bubbles: true }));
-                
+
                 // Adiciona feedback visual
                 highlightField(targetField);
-                
+
                 console.log(`[FK_RELATED] Campo ${localField} preenchido com: ${value}`);
             } else {
                 console.warn(`[FK_RELATED] Campo ${localField} não encontrado no formulário`);
@@ -169,11 +187,11 @@
 
         // Insere o botão após o campo (ou após o wrapper do Select2)
         const wrapper = field.closest('.form-group') || field.parentElement;
-        const insertTarget = field.nextElementSibling?.classList.contains('select2') ? 
-                             field.nextElementSibling : field;
-        
+        const insertTarget = field.nextElementSibling && field.nextElementSibling.classList.contains('select2') ?
+            field.nextElementSibling : field;
+
         insertTarget.parentNode.insertBefore(button, insertTarget.nextSibling);
-        
+
         console.log(`[FK_RELATED] Botão CRUD adicionado para ${tabelaReferencia}`);
     }
 
@@ -207,7 +225,7 @@
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(html, 'text/html');
                 const formContent = doc.querySelector('.container') || doc.body;
-                
+
                 modalBody.innerHTML = formContent.innerHTML;
 
                 // Re-inicializa scripts necessários (Select2, máscaras, etc)
@@ -287,10 +305,10 @@
      */
     function refreshFKField(tabelaReferencia) {
         console.log(`[FK_RELATED] Atualizando campos FK de ${tabelaReferencia}`);
-        
+
         // Encontra todos os campos FK que referenciam esta tabela
         const fkFields = document.querySelectorAll(`[data-tabela-ref="${tabelaReferencia}"]`);
-        
+
         fkFields.forEach(field => {
             if ($(field).hasClass('select2-hidden-accessible')) {
                 // Para Select2, recarrega as opções
@@ -315,14 +333,14 @@
     function showLoadingIndicator(field) {
         const wrapper = field.closest('.form-group') || field.parentElement;
         let indicator = wrapper.querySelector('.fk-loading-indicator');
-        
+
         if (!indicator) {
             indicator = document.createElement('span');
             indicator.className = 'fk-loading-indicator ms-2';
             indicator.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Buscando...';
             wrapper.appendChild(indicator);
         }
-        
+
         indicator.style.display = 'inline-block';
     }
 
@@ -332,7 +350,7 @@
     function hideLoadingIndicator(field) {
         const wrapper = field.closest('.form-group') || field.parentElement;
         const indicator = wrapper.querySelector('.fk-loading-indicator');
-        
+
         if (indicator) {
             indicator.style.display = 'none';
         }
@@ -353,11 +371,11 @@
                     <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
                 </div>
             `;
-            
+
             document.body.appendChild(toast);
             const bsToast = new bootstrap.Toast(toast);
             bsToast.show();
-            
+
             toast.addEventListener('hidden.bs.toast', () => toast.remove());
         } else {
             // Fallback para alert

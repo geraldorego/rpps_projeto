@@ -168,6 +168,7 @@ def migrar_tabela_referencia_para_json():
 class EstruturaMenu(models.Model):
     TIPO_ACAO_CHOICES = [
         ('CRUD', 'Formulário CRUD'),
+        ('CRUD-C', 'Formulário CRUD com cópia'),
         ('BOTAO', 'Ação com Botão'),
         ('RELATORIO', 'Relatório'),
         ('LINK', 'Link Externo'),
@@ -180,6 +181,12 @@ class EstruturaMenu(models.Model):
     label = models.CharField(max_length=100, verbose_name="Rótulo do Menu")
     nometemplate = models.CharField(max_length=50, verbose_name="Nome do Template")
     acao = models.CharField(max_length=50, choices=TIPO_ACAO_CHOICES, default='CRUD', verbose_name="Tipo de Ação")
+    parametros_acao = models.TextField(
+        blank=True,
+        null=True,
+        verbose_name="Parâmetros da ação",
+        help_text="Configuração JSON opcional para ações como CRUD-C.",
+    )
     requer_permissao = models.BooleanField(default=False, verbose_name="Requer Permissão?")
     ordem_menu = models.IntegerField(default=1, verbose_name="Ordem no Menu")
     icone = models.CharField(max_length=50, blank=True, null=True, verbose_name="Ícone (Bootstrap Icons)")

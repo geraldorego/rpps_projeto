@@ -139,6 +139,8 @@
                         fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
                             .then(function(response) { return response.json(); })
                             .then(function(data) {
+                                const displayElement = Array.from(document.querySelectorAll('[data-fk-display-for]'))
+                                    .find(function(element) { return element.dataset.fkDisplayFor === fieldName; });
                                 if (data && data.found && data.data) {
                                     Object.entries(data.data).forEach(function([campoLocal, valorRef]) {
                                         const inputLocal = document.querySelector('[name="' + campoLocal + '"]');
@@ -147,9 +149,48 @@
                                             inputLocal.dispatchEvent(new Event('change', { bubbles: true }));
                                         }
                                     });
+                                    if (displayElement) displayElement.textContent = data.display || '';
+                                    const wrapper = input.closest('.col-md-4, .col-md-6, .form-group') || input.parentElement;
+                                    Array.from(wrapper.querySelectorAll('[data-fk-create-for]'))
+                                        .filter(function(element) { return element.dataset.fkCreateFor === fieldName; })
+                                        .forEach(function(element) { element.remove(); });
+                                    input.dataset.referenceKey = data.key || '';
                                     input.classList.remove('is-invalid');
                                     input.classList.add('is-valid');
                                 } else {
+                                    if (displayElement) {
+                                        displayElement.textContent = (data && data.can_create) ?
+                                            'Registro não encontrado. Use Pesquisar e Novo para cadastrar.' :
+                                            (data && data.message) || 'Não foi possível localizar a referência.';
+                                    }
+                                    if (data && data.can_create) {
+                                        const wrapper = input.closest('.col-md-4, .col-md-6, .form-group') || input.parentElement;
+                                        let createButton = Array.from(wrapper.querySelectorAll('[data-fk-create-for]'))
+                                            .find(function(element) { return element.dataset.fkCreateFor === fieldName; });
+                                        if (!createButton) {
+                                            createButton = document.createElement('button');
+                                            createButton.type = 'button';
+                                            createButton.className = 'btn btn-link btn-sm px-0';
+                                            createButton.dataset.fkCreateFor = fieldName;
+                                            createButton.textContent = 'Cadastrar referência';
+                                            createButton.addEventListener('click', function() {
+                                                const parentForm = input.closest('form');
+                                                const parentTable = parentForm && parentForm.dataset.tabela;
+                                                const referenceTable = input.dataset.tabelaRef;
+                                                if (!parentTable || !referenceTable || !window.htmx) return;
+                                                const params = new URLSearchParams({
+                                                    fk_search: 'true',
+                                                    parent_table: parentTable,
+                                                    fk_field_name: fieldName
+                                                });
+                                                htmx.ajax('GET', '/modal-search/' + encodeURIComponent(referenceTable) + '/?' + params.toString(), {
+                                                    target: '#modal',
+                                                    swap: 'innerHTML'
+                                                });
+                                            });
+                                            wrapper.appendChild(createButton);
+                                        }
+                                    }
                                     input.classList.remove('is-valid');
                                     input.classList.add('is-invalid');
                                 }
@@ -175,7 +216,18 @@
 
                     if (field.tagName === 'SELECT') {
                         field.addEventListener('change', function() {
-                            if (!this.value || !fieldMapping) return;
+                            const fkValue = String(this.value || '');
+                            if (!fkValue || !fieldMapping) return;
+
+                            let requestedValues = [];
+                            try {
+                                requestedValues = JSON.parse(this.dataset.appRppsRelatedRequestedValues || '[]');
+                            } catch (error) {
+                                requestedValues = [];
+                            }
+                            if (requestedValues.includes(fkValue)) return;
+                            requestedValues.push(fkValue);
+                            this.dataset.appRppsRelatedRequestedValues = JSON.stringify(requestedValues);
 
                             const tabelaElement = document.querySelector('[data-tabela]');
                             const tabela = tabelaElement ? tabelaElement.getAttribute('data-tabela') : null;
@@ -185,11 +237,14 @@
                             fetch(url)
                                 .then(function(response) { return response.json(); })
                                 .then(function(data) {
+                                    if (String(field.value || '') !== fkValue) return;
                                     if (!data || !data.success || !data.data) return;
                                     Object.entries(data.data).forEach(function([localField, value]) {
                                         const target = document.querySelector('[name="' + localField + '"]') || document.getElementById('id_' + localField);
-                                        if (target) {
-                                            target.value = value || '';
+                                        if (target && target !== field) {
+                                            const nextValue = value == null ? '' : String(value);
+                                            if (String(target.value || '') === nextValue) return;
+                                            target.value = nextValue;
                                             target.dispatchEvent(new Event('change', { bubbles: true }));
                                         }
                                     });
@@ -202,14 +257,108 @@
                 });
             };
 
+            const attachDependentSelectHandlers = function() {
+                document.querySelectorAll('select[data-fk-deps]').forEach(function(field) {
+                    if (field.dataset.appRppsDependenciesBound === 'true') return;
+                    field.dataset.appRppsDependenciesBound = 'true';
+
+                    const form = field.closest('form');
+                    const fieldName = field.dataset.fkField || field.name;
+                    let dependencyMap = {};
+                    try {
+                        dependencyMap = JSON.parse(field.dataset.fkDeps || '{}');
+                    } catch (error) {
+                        console.error('[AppRpps][FK] Dependências inválidas:', error);
+                        return;
+                    }
+
+                    const dependencyNames = Array.from(new Set(Object.values(dependencyMap)));
+                    if (!dependencyNames.length) return;
+
+                    const refreshOptions = function() {
+                        if (!form || !fieldName) return;
+
+                        const dependencyValues = {};
+                        const missing = [];
+                        dependencyNames.forEach(function(name) {
+                            const dependencyField = form.elements.namedItem(name);
+                            const value = dependencyField && typeof dependencyField.value !== 'undefined' ?
+                                String(dependencyField.value).trim() :
+                                '';
+                            if (!value) {
+                                missing.push(name);
+                            } else {
+                                dependencyValues[name] = value;
+                            }
+                        });
+
+                        const selectedValue = field.value;
+                        const requestId = String((Number(field.dataset.optionsRequestId) || 0) + 1);
+                        field.dataset.optionsRequestId = requestId;
+                        field.replaceChildren(new Option('---------', ''));
+                        if (missing.length) {
+                            field.value = '';
+                            field.dataset.dependenciesReady = 'false';
+                            return;
+                        }
+
+                        const table = form.dataset.tabela;
+                        if (!table) return;
+
+                        const params = new URLSearchParams(dependencyValues);
+                        const url = '/api/reference-options/' + encodeURIComponent(table) + '/' +
+                            encodeURIComponent(fieldName) + '/?' + params.toString();
+
+                        fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                            .then(function(response) {
+                                if (!response.ok) throw new Error('HTTP ' + response.status);
+                                return response.json();
+                            })
+                            .then(function(data) {
+                                if (field.dataset.optionsRequestId !== requestId) return;
+                                field.replaceChildren(new Option('---------', ''));
+                                if (!data || !data.ready || !Array.isArray(data.results)) {
+                                    field.value = '';
+                                    field.dataset.dependenciesReady = 'false';
+                                    return;
+                                }
+
+                                data.results.forEach(function(option) {
+                                    field.add(new Option(option.text, option.value));
+                                });
+                                field.dataset.dependenciesReady = 'true';
+                                field.value = data.results.some(function(option) {
+                                    return String(option.value) === selectedValue;
+                                }) ? selectedValue : '';
+                            })
+                            .catch(function(error) {
+                                if (field.dataset.optionsRequestId !== requestId) return;
+                                field.dataset.dependenciesReady = 'false';
+                                console.error('[AppRpps][FK] Erro ao carregar opções dependentes:', error);
+                            });
+                    };
+
+                    dependencyNames.forEach(function(name) {
+                        const dependencyField = form && form.elements.namedItem(name);
+                        if (dependencyField && dependencyField !== field) {
+                            dependencyField.addEventListener('change', refreshOptions);
+                        }
+                    });
+
+                    refreshOptions();
+                });
+            };
+
             attachFkBlur();
             attachRelatedFieldListeners();
+            attachDependentSelectHandlers();
 
             document.body.addEventListener('htmx:afterSwap', function(evt) {
                 const target = evt.detail && evt.detail.target;
                 if (isFormSwapTarget(target)) {
                     attachFkBlur();
                     attachRelatedFieldListeners();
+                    attachDependentSelectHandlers();
                 }
             }, { once: false });
         },
